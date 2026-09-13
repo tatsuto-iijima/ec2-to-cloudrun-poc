@@ -1,0 +1,63 @@
+# ローカル起動用。サンプルアプリ（Apache/PHP）+ MinIO（S3 互換）。
+# 環境変数は .env から読む（.env.example をコピーして作る）。
+# 実 S3 を使う場合は .env で S3_ENDPOINT= を空に設定し、実際の AWS 認証情報を入れる。
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /mnt/data
+      # .env で S3_ENDPOINT が未定義なら MinIO、空なら本物の S3
+      S3_ENDPOINT: ${S3_ENDPOINT-http://minio:9000}
+    volumes:
+      # EC2 のローカルディスク相当。Cloud Run ではここが Cloud Storage ボリュームになる
+      - ./data:/mnt/data
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+
+  # bind mount した ./data を Apache の実行ユーザー（www-data, uid 33）が書けるようにする
+  data-init:
+    image: alpine:3
+    command: sh -c "chown 33:33 /mnt/data && chmod 0775 /mnt/data"
+    volumes:
+      - ./data:/mnt/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # アップロード先バケットを作る（既にあれば何もしない）
+  minio-init:
+    image: minio/mc:latest
+    env_file:
+      - .env
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "mc alias set local http://minio:9000 \"$$AWS_ACCESS_KEY_ID\" \"$$AWS_SECRET_ACCESS_KEY\"
+      && mc mb --ignore-existing local/\"$$S3_BUCKET\""
+
+volumes:
+  minio-data:
