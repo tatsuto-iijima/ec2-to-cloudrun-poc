@@ -41,12 +41,25 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
                         認証: Cloud Run SA の OIDC ID トークン → STS AssumeRoleWithWebIdentity
 ```
 
-### サンプルアプリの仕様（最小構成）
+### サンプルアプリの仕様（最小構成。#4 で実装済み）
 
 - `GET /` : JSON の現在値を表示し、更新フォームを出す
-- `POST /update` : `DATA_DIR/*.json` を読み → 更新 → 書き戻し（tmp + rename）→ S3 へ PUT
-- `GET /healthz` : 200 を返す
-- `DATA_DIR`、S3 バケット名、リージョンは環境変数で設定する
+- `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303。各段階の所要時間（ms）を `error_log` に 1 行出す
+- `GET /healthz` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）
+- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/S3Uploader.php`（S3 PUT）、`app/templates/index.php`（画面）
+
+| 環境変数 | 既定 | 説明 |
+|---|---|---|
+| `PORT` | `8080` | Apache の待ち受けポート（Cloud Run のコンテナ契約） |
+| `DATA_DIR` | `/mnt/data` | JSON マスタを置くディレクトリ |
+| `DATA_FILE` | `data.json` | JSON マスタのファイル名 |
+| `WRITE_MODE` | `lock` | `lock` = `file_put_contents` + `LOCK_EX`（現行アプリと同じ）/ `rename` = 一時ファイル + `rename` |
+| `S3_BUCKET` | （必須） | アップロード先バケット |
+| `S3_KEY_PREFIX` | 空 | オブジェクトキーの接頭辞 |
+| `AWS_REGION` | `ap-northeast-1` | リージョン |
+| `S3_ENDPOINT` | 未設定 | S3 互換エンドポイント（MinIO / moto）。未設定なら本物の S3 |
+| `S3_USE_PATH_STYLE` | `S3_ENDPOINT` があれば `true` | パススタイルのエンドポイントを使うか |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 未設定 | ローカル（MinIO）用。Cloud Run では使わず WIF（#6）に置き換える |
 
 ## 4. リポジトリ構成
 
@@ -111,23 +124,47 @@ docs/             検証レポート（検証項目ごとに 1 ファイル）+ 
 
 ## 6. ローカルでの起動・検証コマンド
 
-**#4（サンプルアプリの作成とコンテナ化）以降で確定次第、この節を実際のコマンドに置き換える。** 以下は想定。
+### Docker Compose（サンプルアプリ + MinIO。手元の Docker で実行）
 
 ```bash
-# ローカル起動（サンプルアプリ + 作業領域のバインドマウント。S3 は実バケット、なければ MinIO）
-docker compose up --build
+cp .env.example .env            # 初回のみ。MinIO 用の既定値が入っている
+docker compose up --build -d    # app(8080) / minio(9000, コンソール 9001) / minio-init / data-init
+docker compose logs -f app      # Apache のログ（update の所要時間もここに出る）
 
-# 動作確認
-curl -s http://localhost:8080/healthz
-curl -s http://localhost:8080/
-curl -s -X POST http://localhost:8080/update -d 'key=value'
+# スモークテスト（healthz → GET / → POST /update → data/data.json の確認）
+BASE_URL=http://localhost:8080 DATA_DIR=./data scripts/smoke.sh
 
-# GCP 基盤（#5 以降）
-cd terraform/gcp && terraform init && terraform plan && terraform apply
+# rename 方式で起動し直す
+WRITE_MODE=rename docker compose up -d app
 
-# AWS 側（#6 以降）
-cd terraform/aws && terraform init && terraform plan && terraform apply
+docker compose down -v          # 後片付け（MinIO のデータも消す）
+```
 
-# 後片付け
-terraform destroy
+- `./data` はコンテナの `/mnt/data` に bind mount される。`data-init` が `uid 33`（www-data）に chown するので、ホスト側で書き込む場合は権限に注意
+- 実 S3 を使う場合は `.env` で `S3_ENDPOINT=`（空）にし、`AWS_*` に実際の認証情報を入れる
+
+### PHP 内蔵サーバー + moto（Docker が使えない環境。Claude Code の作業環境はこちら）
+
+```bash
+cd app && composer install && cd ..
+python3 -m venv .venv && .venv/bin/pip install "moto[server]" boto3   # .venv は好きな場所でよい
+.venv/bin/moto_server -p 9000 &                                        # S3 互換モック
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test .venv/bin/python -c "import boto3; boto3.client('s3', endpoint_url='http://127.0.0.1:9000', region_name='ap-northeast-1').create_bucket(Bucket='poc-bucket', CreateBucketConfiguration={'LocationConstraint': 'ap-northeast-1'})"
+
+DATA_DIR=$PWD/data S3_BUCKET=poc-bucket S3_ENDPOINT=http://127.0.0.1:9000 \
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=ap-northeast-1 WRITE_MODE=lock \
+php -S 127.0.0.1:8080 -t app/public app/public/index.php &
+
+BASE_URL=http://127.0.0.1:8080 DATA_DIR=$PWD/data scripts/smoke.sh
+```
+
+- 構文チェック: `for f in app/public/index.php app/templates/index.php app/src/*.php; do php -l "$f"; done`
+- サーバーを止めるときは `pkill -f "^php -S"`（`pkill -f "php -S"` は自分のシェルにも一致することがある）
+
+### クラウド（#5 以降で確定次第置き換える）
+
+```bash
+cd terraform/gcp && terraform init && terraform plan && terraform apply   # GCP 基盤
+cd terraform/aws && terraform init && terraform plan && terraform apply   # AWS 側（#6 以降）
+terraform destroy                                                          # 後片付け
 ```
