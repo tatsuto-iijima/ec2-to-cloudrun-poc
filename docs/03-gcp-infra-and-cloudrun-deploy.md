@@ -182,7 +182,12 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
 2. `poc-web` を gcloud（v1 API）で更新（`--update-labels touch=1`、新リビジョン `poc-web-00002-24j`）→ v1 API で新リビジョンを作っても直らない。サービスオブジェクト側の問題
 3. v2 API で `poc-web` を GET → `iapEnabled` / `defaultUriDisabled` / `invokerIamDisabled` は未設定（false）、`ingress: INGRESS_TRAFFIC_ALL`、`launchStage: GA`、`urls` に両形式の URL あり。異常値なし
 
-残る候補は (a) Terraform が付ける `roles/run.invoker` バインディング、(b) ラベル込みの定義、(c) v2 API で作ったサービスオブジェクトそのもの。切り分け（IAM を外す / 同じ定義を gcloud `services replace` で作る）の結果は「6. 実機での確認結果」に記録する。(c) なら Terraform を v1 リソース `google_cloud_run_service`（gen2・Cloud Storage ボリューム対応）に切り替える。
+4. サービスを削除して Terraform で作り直す → 404（毎回再現する。オブジェクトの一時的な破損ではない）
+5. `invoker_member` を空にして `roles/run.invoker` バインディングを外す → 404（IAM は無関係）
+6. Terraform のサービスを `describe --format=export` した定義（ラベル込み）を、名前だけ変えて gcloud `services replace`（v1 API）で作る → **404**
+7. 最小の定義（サンプルイメージ、gen1、ボリューム無し）を v2 REST API で直接作る → **403（到達）**
+
+6・7 より、原因は API の種類（v1 / v2、Terraform / gcloud）ではなく**サービス定義の中身**。`poc-app-test`（403）との差分 6 点（Terraform のラベル、httpGet の startup probe、`mountOptions`、`minScale` / `cpu-throttling` / `sessionAffinity` アノテーション、`WRITE_MODE` と cpu 表記）を 1 点ずつ外して特定する。結果は「6. 実機での確認結果」に記録する。
 
 ### つまずいた点 6: `-var invoker_member=` の apply で Cloud Run サービスごと削除された（2026-09-14）
 
