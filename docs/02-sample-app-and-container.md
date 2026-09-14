@@ -76,7 +76,7 @@ scripts/smoke.sh                  healthz → GET / → POST /update → 表示�
 
 所要時間ログ（参考。ローカル FS + moto）: `read=0.0ms write=0.3ms put=120〜133ms`
 
-## 4. 手元での確認手順（Docker。未実施）
+## 4. 手元での確認手順（Docker）
 
 ### Dev Container で実施する場合（推奨）
 
