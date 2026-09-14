@@ -195,7 +195,7 @@ cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # pro
 
 terraform -chdir=terraform/gcp init && terraform -chdir=terraform/gcp apply   # 1 回目: API / AR / バケット / SA
 scripts/build-push.sh                                                          # Cloud Build で --target runtime をビルドして push。push したタグを terraform/gcp/image.auto.tfvars に書き出す
-terraform -chdir=terraform/gcp apply                                           # 2 回目: Cloud Run（image は image.auto.tfvars から。-var は不要）
+terraform -chdir=terraform/gcp apply                                           # 2 回目: Cloud Run（image は image.auto.tfvars から。-var image は使わない: 空だとサービスが消える）
 
 URL=$(terraform -chdir=terraform/gcp output -raw service_url)
 curl -s -H "Authorization: Bearer $(gcloud auth print-identity-token)" $URL/healthz      # 非公開なので ID トークン付き
