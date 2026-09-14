@@ -8,7 +8,7 @@ declare(strict_types=1);
  * ルーティング:
  *   GET  /        JSON の現在値を表示し、更新フォームを出す
  *   POST /update  JSON を更新して書き戻し、S3 へアップロードする
- *   GET  /healthz 死活確認（ファイルにも S3 にも触らない）
+ *   GET  /health 死活確認（ファイルにも S3 にも触らない）
  *
  * Apache では FallbackResource で、PHP 内蔵サーバーではルータースクリプトとして、すべてのパスがここに来る。
  */
@@ -23,7 +23,7 @@ $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 
 // 死活確認は設定の読み込み前に返す（環境変数の不備でヘルスチェックまで落ちないように）
-if ($method === 'GET' && $path === '/healthz') {
+if ($method === 'GET' && $path === '/health') {
     header('Content-Type: application/json');
     echo json_encode(['status' => 'ok']) . "\n";
     exit;

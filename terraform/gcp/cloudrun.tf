@@ -66,10 +66,10 @@ resource "google_cloud_run_v2_service" "app" {
         mount_path = "/mnt/data"
       }
 
-      # /healthz はファイルにも S3 にも触らない（app/public/index.php）
+      # /health はファイルにも S3 にも触らない（app/public/index.php）
       startup_probe {
         http_get {
-          path = "/healthz"
+          path = "/health"
           port = 8080
         }
         initial_delay_seconds = 0
