@@ -5,7 +5,8 @@
 
 ## 1. 結論
 
-- 現行アプリの「ローカル FS 上の JSON を読み書きし、S3 へアップロード」を再現するサンプル PHP アプリを `app/` に作成し、`php:8.3-apache` ベースの Dockerfile と、MinIO を同梱した `docker-compose.yml` を用意した
+- 現行アプリの「ローカル FS 上の JSON を読み書きし、S3 へアップロード」を再現するサンプル PHP アプリを `app/` に作成し、`php:8.3-apache` ベースの Dockerfile と、S3 モック（moto）を同梱した `docker-compose.yml` を用意した
+- 当初は S3 モックに MinIO を使う計画だったが、`minio/minio` と `minio/mc` が Docker Hub から削除されていて pull できなかったため（5. 参照）、Claude Code の作業環境での検証にも使っている moto（`motoserver/moto`）に置き換えた
 - **アプリ本体は PHP 内蔵サーバー + moto（S3 互換モック）で検証済み**。`WRITE_MODE=lock` / `rename` の両方でスモークテストが全項目 PASS し、S3 オブジェクトの内容がローカル JSON と一致した
 - **Docker イメージのビルドと `docker compose up` は、Claude Code の作業環境に Docker デーモンが無いため未検証**。手元の Docker で「4. 手元での確認手順」を実施して結果を本レポートに追記する
 - Issue #4 の合否基準「`POST /update` で JSON が更新され、S3 にオブジェクトが PUT される」「`/healthz` が 200」は、内蔵サーバー + moto の範囲で満たしている
@@ -24,8 +25,8 @@ docker/
   Dockerfile                      multi-stage: composer:2 で vendor 生成 → php:8.3-apache。ENV PORT=8080, DATA_DIR=/mnt/data, WRITE_MODE=lock
   apache/ports.conf               Listen ${PORT}
   apache/000-default.conf         DocumentRoot /var/www/html/public、FallbackResource /index.php、ログは /proc/self/fd/1,2
-docker-compose.yml                app + minio + minio-init（バケット作成）+ data-init（./data を uid 33 に chown）
-.env.example                      MinIO 用の既定値。実 S3 は S3_ENDPOINT= を空にして AWS_* を差し替える
+docker-compose.yml                app + s3mock（motoserver/moto）+ s3mock-init（amazon/aws-cli でバケット作成）+ data-init（./data を uid 33 に chown）
+.env.example                      moto 用の既定値（認証情報は任意の文字列）。実 S3 は S3_ENDPOINT= を空にして AWS_* を差し替える
 .gitignore                        vendor/, .env, data/*.json, Terraform の state / tfvars, 鍵ファイル
 data/.gitkeep                     ローカルの DATA_DIR（bind mount 先）
 scripts/smoke.sh                  healthz → GET / → POST /update → 表示確認 → data/data.json 確認 →（aws CLI があれば）S3 確認
@@ -77,22 +78,36 @@ scripts/smoke.sh                  healthz → GET / → POST /update → 表示�
 ```bash
 cp .env.example .env
 docker compose up --build -d
-docker compose ps                       # app / minio が Up、minio-init / data-init が Exited 0
+docker compose ps                       # app / s3mock が Up、s3mock-init / data-init が Exited 0
 BASE_URL=http://localhost:8080 DATA_DIR=./data scripts/smoke.sh
 docker compose logs app | grep "update key="
-# MinIO コンソール http://localhost:9001（minioadmin / minioadmin）で poc-bucket/data.json を確認
+# S3 モック上のオブジェクトを確認（aws CLI がある場合。認証情報は任意の値でよい）
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:9000 s3 cp s3://poc-bucket/data.json -
 
 WRITE_MODE=rename docker compose up -d app   # rename 方式でも smoke.sh を通す
-docker compose down -v
+docker compose down
 ```
 
-期待結果: `scripts/smoke.sh` が `ALL PASS`、MinIO 上の `data.json` が `./data/data.json` と一致、`docker compose logs app` に `update key=smoke mode=lock ...` の行が出る。
+期待結果: `scripts/smoke.sh` が `ALL PASS`、moto 上の `data.json` が `./data/data.json` と一致、`docker compose logs app` に `update key=smoke mode=lock ...` の行が出る。
 
 確認できたら、結果（PASS / 所要時間ログ / つまずいた点）を本レポートの「5. Docker での確認結果」に追記する。
 
 ## 5. Docker での確認結果
 
-（未実施。手元で確認後に追記）
+### つまずいた点 1: MinIO のイメージが pull できない（2026-09-14）
+
+`docker compose up --build -d` で次のエラーになった。
+
+```
+✘ Image minio/mc:latest    Error pull access denied for minio/mc, repository does not exist or may require 'docker login'
+```
+
+Docker Hub の API で確認したところ、`minio/minio` と `minio/mc` はリポジトリ自体が存在しない（404）。`bitnami/minio` もタグが無い。
+対処として S3 モックを moto（`motoserver/moto:5.2.3`。Claude Code の作業環境での検証にも使用）に置き換え、バケット作成は `amazon/aws-cli` で行うようにした。moto のデータはメモリ上なので、`docker compose down` で消える。
+
+### スモークテストの結果
+
+（未実施。上記の対処後に手元で確認して追記）
 
 ## 6. #5（Cloud Run デプロイ）へ引き継ぐ事項
 
