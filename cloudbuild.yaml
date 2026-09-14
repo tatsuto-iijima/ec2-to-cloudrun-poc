@@ -1,0 +1,30 @@
+# Cloud Build でサンプルアプリの実行イメージをビルドし、Artifact Registry へ push する。
+# 手元に Docker が無くても Dev Container 内の gcloud から実行できる。
+#
+# 使い方（terraform apply 後）:
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions _IMAGE=$(terraform -chdir=terraform/gcp output -raw image_uri),SHORT_SHA=$(git rev-parse --short HEAD) .
+#
+# 注意: Dockerfile の最終ステージは dev（Dev Container 用）なので、必ず --target runtime を指定する
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --target
+      - runtime
+      - -f
+      - docker/Dockerfile
+      - -t
+      - ${_IMAGE}:${SHORT_SHA}
+      - -t
+      - ${_IMAGE}:latest
+      - .
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:latest
+options:
+  # 既定の Compute SA でビルドするため、ログの保存先を Cloud Logging に限定する
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  # terraform output image_uri（例: asia-northeast1-docker.pkg.dev/PROJECT/poc-app/app）を渡す
+  _IMAGE: ""

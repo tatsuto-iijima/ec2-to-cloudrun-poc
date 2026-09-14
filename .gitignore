@@ -10,6 +10,8 @@
 
 # Terraform
 **/.terraform/
+# provider の lock は各自の環境（CPU アーキテクチャ）で生成する
+.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
 *.tfvars
