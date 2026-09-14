@@ -1,9 +1,13 @@
 # Cloud Run サービス。var.image が空なら作らない（1 回目の apply で AR / バケット / SA だけ作り、
 # Cloud Build でイメージを push してから 2 回目の apply で作る）。
+locals {
+  service_name = var.service_name != "" ? var.service_name : "${var.name_prefix}-app"
+}
+
 resource "google_cloud_run_v2_service" "app" {
   count = var.image == "" ? 0 : 1
 
-  name     = "${var.name_prefix}-app"
+  name     = local.service_name
   location = var.region
 
   # 認証は IAM（roles/run.invoker）で制御する。ネットワーク上は到達可能だが allUsers には付与しない

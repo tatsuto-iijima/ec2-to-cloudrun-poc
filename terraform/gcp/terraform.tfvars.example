@@ -9,6 +9,7 @@ invoker_member = "user:you@example.com"
 # image = "asia-northeast1-docker.pkg.dev/your-gcp-project-id/poc-app/app:abc1234"
 
 # 必要なら上書き（既定値は variables.tf）
+# service_name  = "poc-web"        # run.app のホスト名を変えたいとき（既定は poc-app）
 # region        = "asia-northeast1"
 # s3_bucket     = "poc-bucket"
 # write_mode    = "lock"

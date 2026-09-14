@@ -17,6 +17,12 @@ variable "name_prefix" {
   default     = "poc"
 }
 
+variable "service_name" {
+  description = "Cloud Run サービス名。空なら \"<name_prefix>-app\"。run.app のホスト名はサービス名から決まるため、経路の不具合時に名前だけ変えて作り直す用途で使う"
+  type        = string
+  default     = ""
+}
+
 variable "image" {
   description = "Cloud Run にデプロイするイメージ（例: asia-northeast1-docker.pkg.dev/PROJECT/poc-app/app:abc1234）。空なら Cloud Run サービスを作らない（1 回目の apply 用）"
   type        = string
