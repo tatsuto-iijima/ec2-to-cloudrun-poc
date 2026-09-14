@@ -1,0 +1,62 @@
+# ローカル起動用。サンプルアプリ（Apache/PHP）+ moto（S3 互換モック）。
+# 環境変数は .env から読む（.env.example をコピーして作る）。
+# 実 S3 を使う場合は .env で S3_ENDPOINT= を空に設定し、実際の AWS 認証情報を入れる。
+#
+# 補足: 当初は MinIO を使う予定だったが、minio/minio と minio/mc は Docker Hub から削除されており
+# pull できない（2026-09 時点）。代わりに Claude Code の作業環境での検証にも使っている moto を使う。
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      # Dockerfile の最終ステージは dev（Dev Container 用）なので、実行イメージを明示する
+      target: runtime
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /mnt/data
+      # .env で S3_ENDPOINT が未定義なら moto、空なら本物の S3
+      S3_ENDPOINT: ${S3_ENDPOINT-http://s3mock:5000}
+    volumes:
+      # EC2 のローカルディスク相当。Cloud Run ではここが Cloud Storage ボリュームになる
+      - ./data:/mnt/data
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+      s3mock-init:
+        condition: service_completed_successfully
+
+  # bind mount した ./data を Apache の実行ユーザー（www-data, uid 33）が書けるようにする
+  data-init:
+    image: alpine:3
+    command: sh -c "chown 33:33 /mnt/data && chmod 0775 /mnt/data"
+    volumes:
+      - ./data:/mnt/data
+
+  # S3 互換モック（moto server）。データはメモリ上に持つため、コンテナを再作成すると消える
+  s3mock:
+    image: motoserver/moto:5.2.3
+    ports:
+      # ホストからは http://localhost:9000 で確認できる（aws --endpoint-url http://localhost:9000 s3 ls）
+      - "9000:5000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:5000/moto-api/"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # アップロード先バケットを作る（既にあれば何もしない）
+  s3mock-init:
+    image: amazon/aws-cli:2.36.44
+    env_file:
+      - .env
+    environment:
+      AWS_DEFAULT_REGION: ${AWS_REGION:-ap-northeast-1}
+    depends_on:
+      s3mock:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "aws --endpoint-url http://s3mock:5000 s3api head-bucket --bucket \"$$S3_BUCKET\" 2>/dev/null
+      || aws --endpoint-url http://s3mock:5000 s3 mb s3://\"$$S3_BUCKET\""

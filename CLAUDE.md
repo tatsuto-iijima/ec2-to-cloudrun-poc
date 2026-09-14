@@ -23,7 +23,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 
 | 項目 | 選定 |
 |---|---|
-| コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集） |
+| コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
 | 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1` |
 | 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す |
 | IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割 |
@@ -41,20 +41,34 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
                         認証: Cloud Run SA の OIDC ID トークン → STS AssumeRoleWithWebIdentity
 ```
 
-### サンプルアプリの仕様（最小構成）
+### サンプルアプリの仕様（最小構成。#4 で実装済み）
 
 - `GET /` : JSON の現在値を表示し、更新フォームを出す
-- `POST /update` : `DATA_DIR/*.json` を読み → 更新 → 書き戻し（tmp + rename）→ S3 へ PUT
-- `GET /healthz` : 200 を返す
-- `DATA_DIR`、S3 バケット名、リージョンは環境変数で設定する
+- `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303。各段階の所要時間（ms）を `error_log` に 1 行出す
+- `GET /healthz` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）
+- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/S3Uploader.php`（S3 PUT）、`app/templates/index.php`（画面）
+
+| 環境変数 | 既定 | 説明 |
+|---|---|---|
+| `PORT` | `8080` | Apache の待ち受けポート（Cloud Run のコンテナ契約） |
+| `DATA_DIR` | `/mnt/data` | JSON マスタを置くディレクトリ |
+| `DATA_FILE` | `data.json` | JSON マスタのファイル名 |
+| `WRITE_MODE` | `lock` | `lock` = `file_put_contents` + `LOCK_EX`（現行アプリと同じ）/ `rename` = 一時ファイル + `rename` |
+| `S3_BUCKET` | （必須） | アップロード先バケット |
+| `S3_KEY_PREFIX` | 空 | オブジェクトキーの接頭辞 |
+| `AWS_REGION` | `ap-northeast-1` | リージョン |
+| `S3_ENDPOINT` | 未設定 | S3 互換エンドポイント（ローカルの moto）。未設定なら本物の S3 |
+| `S3_USE_PATH_STYLE` | `S3_ENDPOINT` があれば `true` | パススタイルのエンドポイントを使うか |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 未設定 | ローカル（moto）用。Cloud Run では使わず WIF（#6）に置き換える |
 
 ## 4. リポジトリ構成
 
 ```
 CLAUDE.md         このファイル（AI 駆動開発の前提・ルール）
 README.md         リポジトリの概要
+.devcontainer/    Dev Container（docker-compose.yml の app サービスをベースに AWS CLI / Terraform を同梱）
 app/              サンプル PHP アプリ（public/, src/, composer.json）
-docker/           Dockerfile, Apache 設定
+docker/           Dockerfile（runtime / dev の 2 ステージ）, Apache 設定
 docker-compose.yml ローカル起動用
 terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry
 terraform/aws/    S3 / IAM ロール（Google OIDC 信頼）
@@ -111,23 +125,69 @@ docs/             検証レポート（検証項目ごとに 1 ファイル）+ 
 
 ## 6. ローカルでの起動・検証コマンド
 
-**#4（サンプルアプリの作成とコンテナ化）以降で確定次第、この節を実際のコマンドに置き換える。** 以下は想定。
+### Dev Container（推奨。手元の Docker + VS Code）
+
+`.devcontainer/` は `docker-compose.yml` の **`app` サービス自体を開発環境にする**構成。Apache が動いたまま `app/` の編集が即反映され、AWS CLI / Terraform / composer / git が入っている。
 
 ```bash
-# ローカル起動（サンプルアプリ + 作業領域のバインドマウント。S3 は実バケット、なければ MinIO）
-docker compose up --build
+# VS Code で「Reopen in Container」。初回は .env が無ければ .env.example からコピーされ、
+# compose スタック（app / s3mock / s3mock-init / data-init）が起動し、コンテナ内で composer install が走る
 
-# 動作確認
+# コンテナ内のターミナルで（BASE_URL / DATA_DIR / S3_* / AWS_* は設定済み）
+scripts/smoke.sh                                                        # S3 の確認まで含めて ALL PASS になる
+aws --endpoint-url http://s3mock:5000 s3 cp s3://poc-bucket/data.json - # S3 モック上のオブジェクト
 curl -s http://localhost:8080/healthz
-curl -s http://localhost:8080/
-curl -s -X POST http://localhost:8080/update -d 'key=value'
+```
 
-# GCP 基盤（#5 以降）
-cd terraform/gcp && terraform init && terraform plan && terraform apply
+- `WRITE_MODE=rename` への切り替えなど compose の操作（再起動、`down`）はホスト側のターミナルで行う（コンテナ内に Docker CLI は無い）
+- ホスト側で `docker compose up` するときは `target: runtime`（実行イメージ）、Dev Container は `target: dev` で同じ Dockerfile をビルドする
 
-# AWS 側（#6 以降）
-cd terraform/aws && terraform init && terraform plan && terraform apply
+### Docker Compose（サンプルアプリ + moto の S3 モック。手元の Docker で実行）
 
-# 後片付け
-terraform destroy
+```bash
+cp .env.example .env            # 初回のみ。moto 用の既定値が入っている
+docker compose up --build -d    # app(8080) / s3mock(ホスト 9000 → コンテナ 5000) / s3mock-init / data-init
+docker compose logs -f app      # Apache のログ（update の所要時間もここに出る）
+
+# スモークテスト（healthz → GET / → POST /update → data/data.json の確認）
+BASE_URL=http://localhost:8080 DATA_DIR=./data scripts/smoke.sh
+
+# S3 モック上のオブジェクトを確認（aws CLI がある場合。認証情報は任意の値でよい）
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:9000 s3 cp s3://poc-bucket/data.json -
+
+# rename 方式で起動し直す
+WRITE_MODE=rename docker compose up -d app
+
+docker compose down             # 後片付け（moto のデータはメモリ上なので一緒に消える）
+```
+
+- `./data` はコンテナの `/mnt/data` に bind mount される。`data-init` が `uid 33`（www-data）に chown するので、ホスト側で書き込む場合は権限に注意
+- 実 S3 を使う場合は `.env` で `S3_ENDPOINT=`（空）にし、`AWS_*` に実際の認証情報を入れる
+- S3 モックに moto（`motoserver/moto`）を使うのは、MinIO の公式イメージ（`minio/minio`, `minio/mc`）が Docker Hub から削除されていて pull できないため（2026-09 確認）
+- pull 中に `error getting credentials - err: exit status 1, out: ``` が出たら、`~/.docker/config.json` の `credsStore`（Docker Desktop の認証ヘルパー）が失敗している。使うイメージはすべて公開イメージなので `docker login` は不要。対処は `docs/02` の「つまずいた点 2」
+
+### PHP 内蔵サーバー + moto（Docker が使えない環境。Claude Code の作業環境はこちら）
+
+```bash
+cd app && composer install && cd ..
+python3 -m venv .venv && .venv/bin/pip install "moto[server]" boto3   # .venv は好きな場所でよい
+.venv/bin/moto_server -p 9000 &                                        # S3 互換モック
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test .venv/bin/python -c "import boto3; boto3.client('s3', endpoint_url='http://127.0.0.1:9000', region_name='ap-northeast-1').create_bucket(Bucket='poc-bucket', CreateBucketConfiguration={'LocationConstraint': 'ap-northeast-1'})"
+
+DATA_DIR=$PWD/data S3_BUCKET=poc-bucket S3_ENDPOINT=http://127.0.0.1:9000 \
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=ap-northeast-1 WRITE_MODE=lock \
+php -S 127.0.0.1:8080 -t app/public app/public/index.php &
+
+BASE_URL=http://127.0.0.1:8080 DATA_DIR=$PWD/data scripts/smoke.sh
+```
+
+- 構文チェック: `for f in app/public/index.php app/templates/index.php app/src/*.php; do php -l "$f"; done`
+- サーバーを止めるときは `pkill -f "^php -S"`（`pkill -f "php -S"` は自分のシェルにも一致することがある）
+
+### クラウド（#5 以降で確定次第置き換える）
+
+```bash
+cd terraform/gcp && terraform init && terraform plan && terraform apply   # GCP 基盤
+cd terraform/aws && terraform init && terraform plan && terraform apply   # AWS 側（#6 以降）
+terraform destroy                                                          # 後片付け
 ```

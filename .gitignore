@@ -1,0 +1,21 @@
+# Composer
+/app/vendor/
+
+# 環境変数（秘匿値を含む）
+/.env
+
+# ローカルの DATA_DIR（JSON マスタは成果物ではない）
+/data/*
+!/data/.gitkeep
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# 認証情報
+*.pem
+*-key.json

@@ -1,0 +1,18 @@
+# Dev Container 用の上書き。../docker-compose.yml の app サービスをそのまま開発環境にする。
+# - build.target を dev にして git / composer 入りのステージを使う（実行イメージ runtime には含まれない）
+# - リポジトリ全体を /workspace に、app/ を Apache の DocumentRoot 側にも bind mount して編集を即反映する
+# - Apache はコンテナの main process として動き続けるので、コンテナ内から http://localhost:8080 で確認できる
+#
+# 注意: 相対パスは「最初に指定した compose ファイルのディレクトリ」= リポジトリ直下を基準に解決される
+# （devcontainer.json の dockerComposeFile は ../docker-compose.yml が先頭）。このファイルの位置基準ではない
+services:
+  app:
+    build:
+      target: dev
+    volumes:
+      - .:/workspace:cached
+      # イメージ内の vendor/ は隠れるので、postCreateCommand の composer install で生成する
+      - ./app:/var/www/html:cached
+    environment:
+      # scripts/smoke.sh 用（同一コンテナ内なので localhost）。DATA_DIR / S3_* / AWS_* は基の compose と .env から入る
+      BASE_URL: http://localhost:8080
