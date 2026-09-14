@@ -9,6 +9,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      # Dockerfile の最終ステージは dev（Dev Container 用）なので、実行イメージを明示する
+      target: runtime
     ports:
       - "8080:8080"
     env_file:

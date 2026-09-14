@@ -9,7 +9,8 @@ COPY app/composer.json app/composer.lock ./
 RUN composer install --no-dev --no-interaction --no-progress --optimize-autoloader --ignore-platform-reqs
 
 # ---- 実行イメージ（Apache + PHP 8.3。現行 EC2 の Apache/PHP 構成に相当） ----
-FROM php:8.3-apache
+# Cloud Run にデプロイするのはこのステージ。最終ステージは dev なので、ビルド時は --target runtime を指定する
+FROM php:8.3-apache AS runtime
 
 # Cloud Run は PORT 環境変数で待ち受けポートを指定する。既定は 8080
 ENV PORT=8080 \
@@ -30,3 +31,12 @@ RUN mkdir -p /mnt/data && chown www-data:www-data /mnt/data
 
 WORKDIR /var/www/html
 EXPOSE 8080
+
+# ---- 開発用（Dev Container）。実行イメージ runtime には含めない ----
+# runtime と同じ Apache/PHP のまま、git / composer など開発に必要なツールだけを足す。
+# AWS CLI や Terraform は .devcontainer/devcontainer.json の features で載せる
+FROM runtime AS dev
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git unzip less \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
