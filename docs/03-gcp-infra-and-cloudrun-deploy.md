@@ -182,6 +182,7 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
   5. 同じ定義を gcloud `services replace` で作る → 404
   6. 最小の定義を v2 REST API で作る → 403（`/` を確認していた）
   7. `poc-app-test` との差分 6 点（ラベル / startup probe / `mountOptions` / アノテーション / 環境変数 / cpu 表記）を 1 点ずつ外す → 全部 404
+- 公式の既知の問題として記載あり: [Cloud Run の既知の問題「予約済みの URL パス」](https://docs.cloud.google.com/run/docs/known-issues?hl=ja#reserved-url-paths)
 - 同じ現象の報告: [Cloud Run Service Returns Google 404 Despite Being Healthy（Google Developer forums）](https://discuss.google.dev/t/platform-block-cloud-run-service-returns-google-404-despite-being-healthy-and-publicly-configured/193122)、[/healthz is unreachable on run.app（GitHub issue）](https://github.com/coldworkshq/doug/issues/300)。`/health` `/healthz/...` `/livez` `/readyz` など `/healthz` 以外は通る
 - startup probe の `/healthz` は Cloud Run が**コンテナに直接**打つのでフロントエンドを通らず、リビジョンは Ready になっていた。そのため「Ready なのに 404」に見えた
 
