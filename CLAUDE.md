@@ -45,7 +45,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 
 - `GET /` : JSON の現在値を表示し、更新フォームを出す
 - `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303。各段階の所要時間（ms）を `error_log` に 1 行出す
-- `GET /health` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）。**`/healthz` は使わない**: `*.run.app` では Google のフロントエンドが `/healthz` を横取りして 404 を返し、コンテナに届かない（docs/03 つまずいた点 5）
+- `GET /health` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）。**`/healthz` は使わない**: `*.run.app` では Google のフロントエンドが `/healthz` を横取りして 404 を返し、コンテナに届かない（Cloud Run の既知の問題「予約済みの URL パス」。docs/03 つまずいた点 5）
 - コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/S3Uploader.php`（S3 PUT）、`app/templates/index.php`（画面）
 
 | 環境変数 | 既定 | 説明 |
