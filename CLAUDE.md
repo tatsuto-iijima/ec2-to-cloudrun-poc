@@ -70,7 +70,9 @@ README.md         リポジトリの概要
 app/              サンプル PHP アプリ（public/, src/, composer.json）
 docker/           Dockerfile（runtime / dev の 2 ステージ）, Apache 設定
 docker-compose.yml ローカル起動用
-terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry
+cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registry へ push（--target runtime）
+.gcloudignore     Cloud Build に送らないファイル
+terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state はローカル）
 terraform/aws/    S3 / IAM ロール（Google OIDC 信頼）
 scripts/          計測スクリプト（コールドスタート、処理時間、読み書き）
 docs/             検証レポート（検証項目ごとに 1 ファイル）+ 最終判定
@@ -184,10 +186,29 @@ BASE_URL=http://127.0.0.1:8080 DATA_DIR=$PWD/data scripts/smoke.sh
 - 構文チェック: `for f in app/public/index.php app/templates/index.php app/src/*.php; do php -l "$f"; done`
 - サーバーを止めるときは `pkill -f "^php -S"`（`pkill -f "php -S"` は自分のシェルにも一致することがある）
 
-### クラウド（#5 以降で確定次第置き換える）
+### GCP（Dev Container 内で実施。詳細は `docs/03`）
 
 ```bash
-cd terraform/gcp && terraform init && terraform plan && terraform apply   # GCP 基盤
-cd terraform/aws && terraform init && terraform plan && terraform apply   # AWS 側（#6 以降）
-terraform destroy                                                          # 後片付け
+gcloud auth login --no-launch-browser && gcloud auth application-default login --no-launch-browser
+gcloud config set project <PROJECT_ID>
+cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # project_id, invoker_member を記入
+
+terraform -chdir=terraform/gcp init && terraform -chdir=terraform/gcp apply   # 1 回目: API / AR / バケット / SA
+gcloud builds submit --config cloudbuild.yaml \
+  --substitutions _IMAGE=$(terraform -chdir=terraform/gcp output -raw image_uri),SHORT_SHA=$(git rev-parse --short HEAD) .
+terraform -chdir=terraform/gcp apply -var image=$(terraform -chdir=terraform/gcp output -raw image_uri):$(git rev-parse --short HEAD)   # 2 回目: Cloud Run
+
+URL=$(terraform -chdir=terraform/gcp output -raw service_url)
+curl -s -H "Authorization: Bearer $(gcloud auth print-identity-token)" $URL/healthz      # 非公開なので ID トークン付き
+gcloud run services proxy $(terraform -chdir=terraform/gcp output -raw service_name) --region asia-northeast1 --port 8081   # ブラウザ用
+terraform -chdir=terraform/gcp destroy                                                    # 後片付け
+```
+
+- Cloud Run は非公開（`invoker_member` にだけ `roles/run.invoker`）。`allUsers` には付与しない
+- Claude Code の作業環境では `apply` できない（GCP の認証情報が無い）。`terraform fmt` / `validate` までを行い、`apply` と動作確認はユーザーの手元で実施する。provider は `releases.hashicorp.com` から filesystem mirror で取得する（`registry.terraform.io` は遮断）
+
+### AWS（#6 で確定次第置き換える）
+
+```bash
+cd terraform/aws && terraform init && terraform plan && terraform apply
 ```
