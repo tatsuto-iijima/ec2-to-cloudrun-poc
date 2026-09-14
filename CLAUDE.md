@@ -45,7 +45,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 
 - `GET /` : JSON の現在値を表示し、更新フォームを出す
 - `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303。各段階の所要時間（ms）を `error_log` に 1 行出す
-- `GET /healthz` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）
+- `GET /health` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）。**`/healthz` は使わない**: `*.run.app` では Google のフロントエンドが `/healthz` を横取りして 404 を返し、コンテナに届かない（docs/03 つまずいた点 5）
 - コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/S3Uploader.php`（S3 PUT）、`app/templates/index.php`（画面）
 
 | 環境変数 | 既定 | 説明 |
@@ -138,7 +138,7 @@ docs/             検証レポート（検証項目ごとに 1 ファイル）+ 
 # コンテナ内のターミナルで（BASE_URL / DATA_DIR / S3_* / AWS_* は設定済み）
 scripts/smoke.sh                                                        # S3 の確認まで含めて ALL PASS になる
 aws --endpoint-url http://s3mock:5000 s3 cp s3://poc-bucket/data.json - # S3 モック上のオブジェクト
-curl -s http://localhost:8080/healthz
+curl -s http://localhost:8080/health
 ```
 
 - `WRITE_MODE=rename` への切り替えなど compose の操作（再起動、`down`）はホスト側のターミナルで行う（コンテナ内に Docker CLI は無い）
@@ -151,7 +151,7 @@ cp .env.example .env            # 初回のみ。moto 用の既定値が入っ�
 docker compose up --build -d    # app(8080) / s3mock(ホスト 9000 → コンテナ 5000) / s3mock-init / data-init
 docker compose logs -f app      # Apache のログ（update の所要時間もここに出る）
 
-# スモークテスト（healthz → GET / → POST /update → data/data.json の確認）
+# スモークテスト（health → GET / → POST /update → data/data.json の確認）
 BASE_URL=http://localhost:8080 DATA_DIR=./data scripts/smoke.sh
 
 # S3 モック上のオブジェクトを確認（aws CLI がある場合。認証情報は任意の値でよい）
@@ -198,7 +198,7 @@ scripts/build-push.sh                                                          #
 terraform -chdir=terraform/gcp apply                                           # 2 回目: Cloud Run（image は image.auto.tfvars から。-var image は使わない: 空だとサービスが消える）
 
 URL=$(terraform -chdir=terraform/gcp output -raw service_url)
-curl -s -H "Authorization: Bearer $(gcloud auth print-identity-token)" $URL/healthz      # 非公開なので ID トークン付き
+curl -s -H "Authorization: Bearer $(gcloud auth print-identity-token)" $URL/health      # 非公開なので ID トークン付き
 gcloud run services proxy $(terraform -chdir=terraform/gcp output -raw service_name) --region asia-northeast1 --port 8081   # ブラウザ用
 terraform -chdir=terraform/gcp destroy                                                    # 後片付け
 ```
