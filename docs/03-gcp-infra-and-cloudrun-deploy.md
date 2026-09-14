@@ -182,11 +182,14 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
   5. 同じ定義を gcloud `services replace` で作る → 404
   6. 最小の定義を v2 REST API で作る → 403（`/` を確認していた）
   7. `poc-app-test` との差分 6 点（ラベル / startup probe / `mountOptions` / アノテーション / 環境変数 / cpu 表記）を 1 点ずつ外す → 全部 404
-- 公式の既知の問題として記載あり: [Cloud Run の既知の問題「予約済みの URL パス」](https://docs.cloud.google.com/run/docs/known-issues?hl=ja#reserved-url-paths)
+- 公式の既知の問題として記載あり: [Cloud Run の既知の問題「予約済みの URL パス」](https://docs.cloud.google.com/run/docs/known-issues?hl=ja#reserved-url-paths)。使用できないパスは次のとおり
+  - `/eventlog`
+  - `/_ah/` で始まるパス
+  - **末尾が `z` のパス**（`/healthz` はこれに該当。予約済みパスとの競合を防ぐため、末尾が `z` のパスは避けることが推奨されている）
 - 同じ現象の報告: [Cloud Run Service Returns Google 404 Despite Being Healthy（Google Developer forums）](https://discuss.google.dev/t/platform-block-cloud-run-service-returns-google-404-despite-being-healthy-and-publicly-configured/193122)、[/healthz is unreachable on run.app（GitHub issue）](https://github.com/coldworkshq/doug/issues/300)。`/health` `/healthz/...` `/livez` `/readyz` など `/healthz` 以外は通る
 - startup probe の `/healthz` は Cloud Run が**コンテナに直接**打つのでフロントエンドを通らず、リビジョンは Ready になっていた。そのため「Ready なのに 404」に見えた
 
-対処: 死活確認のパスを `/healthz` から **`/health`** に変更（`app/public/index.php`、`terraform/gcp/cloudrun.tf` の startup probe、`scripts/smoke.sh`、CLAUDE.md、docs/02）。教訓: 「到達できない」の比較は**同じパス**で行う。最初に `/` と `/healthz` の両方を確認していれば 1 回で判った。
+対処: 死活確認のパスを `/healthz` から **`/health`** に変更（`app/public/index.php`、`terraform/gcp/cloudrun.tf` の startup probe、`scripts/smoke.sh`、CLAUDE.md、docs/02）。以後アプリに経路を足すときは、末尾 `z`・`/eventlog`・`/_ah/` を避ける。教訓: 「到達できない」の比較は**同じパス**で行う。最初に `/` と `/healthz` の両方を確認していれば 1 回で判った。
 
 ### つまずいた点 6: `-var invoker_member=` の apply で Cloud Run サービスごと削除された（2026-09-14）
 
