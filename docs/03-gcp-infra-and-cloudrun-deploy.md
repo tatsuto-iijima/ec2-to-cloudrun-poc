@@ -169,8 +169,9 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
 
 ### つまずいた点 5: Cloud Run サービスが Ready なのに run.app URL が 404（2026-09-14）
 
-`poc-app` が Ready・ingress `all`・トラフィック 100% で、DNS も正常（Cloud Run の正規 IP）なのに、認証あり／なしとも Google の汎用 404 ページが返り、コンテナにリクエストが届かなかった。同じリージョンに gcloud でデプロイした `hello` と、同じイメージ・同じ設定で gcloud からデプロイした `poc-app-test` は 403（到達）。`describe --format=export` の差分に経路へ影響する項目は無し。
-対処: run.app のホスト名がサービス名から決まるため、`service_name` 変数を追加してサービス名だけを変えて作り直せるようにした（`-var service_name=poc-web`）。結果は「6. 実機での確認結果」に記録する。
+`poc-app` が Ready・ingress `all`・トラフィック 100% で、DNS も正常（Cloud Run の正規 IP）なのに、認証あり／なしとも Google の汎用 404 ページが返り、コンテナにリクエストが届かなかった（リクエストログも無し）。同じリージョンに gcloud でデプロイした `hello`（サンプルイメージ）は認証なしで 403（到達）。同じイメージ・同じ設定で gcloud からデプロイした `poc-app-test` は `describe --format=export` の差分に経路へ影響する項目が無いことまで確認したが、到達可否は未確認。
+試したこと: `service_name` 変数を追加し、サービス名（= run.app のホスト名）だけを変えて `poc-web` として作り直した → **変化なし（404）**。ホスト名の経路情報の残留ではない。
+切り分けの続き（Terraform（v2 API）で作ったサービスだけが 404 になる差を探す）は「6. 実機での確認結果」に記録する。
 
 ## 6. 実機での確認結果
 
