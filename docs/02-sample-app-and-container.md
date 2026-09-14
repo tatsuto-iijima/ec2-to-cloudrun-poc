@@ -105,6 +105,30 @@ docker compose down
 Docker Hub の API で確認したところ、`minio/minio` と `minio/mc` はリポジトリ自体が存在しない（404）。`bitnami/minio` もタグが無い。
 対処として S3 モックを moto（`motoserver/moto:5.2.3`。Claude Code の作業環境での検証にも使用）に置き換え、バケット作成は `amazon/aws-cli` で行うようにした。moto のデータはメモリ上なので、`docker compose down` で消える。
 
+### つまずいた点 2: `error getting credentials - err: exit status 1, out: ``（2026-09-14）
+
+moto への置き換え後、`alpine:3` / `motoserver/moto:5.2.3` / `amazon/aws-cli:2.36.44` の pull が進行中（aws-cli は 89MB / 140MB まで到達）に次で中断した。
+
+```
+error getting credentials - err: exit status 1, out: ``
+```
+
+これは Docker CLI が `~/.docker/config.json` の `credsStore` / `credHelpers` に指定された**認証ヘルパー**（Docker Desktop の `docker-credential-desktop`、Linux の `pass` / `secretservice` など）を呼び出して失敗したときのメッセージ。compose の内容やイメージの存在とは無関係で、リポジトリ側の修正は不要。この PoC で使うイメージはすべて公開イメージなので `docker login` も不要。
+
+確認と対処（ユーザーの手元で実施）:
+
+```bash
+cat ~/.docker/config.json                                          # "credsStore": "desktop" などが入っているはず
+echo https://index.docker.io/v1/ | docker-credential-desktop get   # ヘルパー単体で失敗すればこれが原因（WSL では docker-credential-desktop.exe）
+```
+
+| 環境 | 典型的な原因 | 対処 |
+|---|---|---|
+| macOS Docker Desktop | キーチェーンがロック、Docker Desktop が完全に起動していない | Docker Desktop を再起動（必要なら `security unlock-keychain`）して再実行 |
+| Windows + WSL2 | WSL 側の PATH に `docker-credential-desktop.exe` が無い | `export PATH="$PATH:/mnt/c/Program Files/Docker/Docker/resources/bin"` |
+| Linux | `credsStore` が `pass` / `secretservice` で未初期化 | `pass init` するか、下の共通対処 |
+| 共通 | 公開イメージしか使わない | `~/.docker/config.json` をバックアップし、`"credsStore"` 行を削除して再実行 |
+
 ### スモークテストの結果
 
 （未実施。上記の対処後に手元で確認して追記）
