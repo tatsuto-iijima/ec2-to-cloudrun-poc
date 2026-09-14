@@ -41,7 +41,7 @@ docker/Dockerfile             dev ステージに gcloud CLI を追加（公式 
 | CPU / メモリ | 1 / 512Mi、`cpu_idle = true` | 従量課金の基本構成。`/tmp` はインメモリなので余裕を持たせる |
 | 環境変数 | `DATA_DIR=/mnt/data`, `WRITE_MODE`, `S3_BUCKET`, `AWS_REGION` | `AWS_ACCESS_KEY_ID` 等は渡さない（#6 で WIF） |
 | ボリューム | `gcs { bucket, read_only=false, mount_options=["uid=33","gid=33"] }` → `/mnt/data` | Apache の worker は www-data（uid/gid 33）。gcsfuse の既定はマウントしたユーザー所有・0644/0755 なので所有者を合わせて書き込めるようにする |
-| startup probe | `GET /healthz`（2 秒間隔、最大 15 回） | `/healthz` はファイルにも S3 にも触らない |
+| startup probe | `GET /health`（2 秒間隔、最大 15 回） | `/health` はファイルにも S3 にも触らない。`/healthz` は run.app で Google のフロントエンドに横取りされるため使わない（つまずいた点 5） |
 | ingress | `INGRESS_TRAFFIC_ALL` + IAM で認証必須 | 非公開運用。`allUsers` には付与しない |
 | 実行 SA | `poc-run@PROJECT.iam.gserviceaccount.com` | バケットの読み書きのみ。#6 で AWS 側の信頼ポリシーに使う |
 
@@ -84,8 +84,8 @@ terraform -chdir=terraform/gcp apply
 URL=$(terraform -chdir=terraform/gcp output -raw service_url)
 TOKEN=$(gcloud auth print-identity-token)
 
-# 合否基準 1: /healthz が 200
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" $URL/healthz
+# 合否基準 1: /health が 200
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" $URL/health
 
 # 合否基準 2: GET / で JSON が表示される（初回は初期データ）。フッターに DATA_DIR=/mnt/data が出る
 curl -s -H "Authorization: Bearer $TOKEN" $URL/ | grep -oE 'DATA_DIR=<code>[^<]*|<th>[^<]*</th>'
@@ -109,7 +109,7 @@ terraform -chdir=terraform/gcp destroy
 
 | 確認 | 期待 |
 |---|---|
-| `/healthz` | `200` |
+| `/health` | `200` |
 | `GET /` | 200。`message` / `counter` の表と `DATA_DIR=/mnt/data` |
 | `POST /update` | **500**（`PutObject` の認証エラー。#6 で解消）。ただしバケットに `data.json` が作られている（www-data が gcsfuse 上に書けている） |
 | `gcloud storage cat` | `counter: 1`、`hello: world`、`updated_at` が入った JSON |
@@ -169,25 +169,21 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
 
 ### つまずいた点 5: Cloud Run サービスが Ready なのに run.app URL が 404（2026-09-14）
 
-`poc-app` が Ready・ingress `all`（`ingress-status: all`、組織ポリシー `run.allowedIngress` は ALLOW all）・トラフィック 100% で、DNS も正常（Cloud Run の正規 IP）なのに、認証あり／なしとも Google の汎用 404 ページが返り、コンテナにリクエストが届かなかった（リクエストログも無し）。
+**原因: `*.run.app` では Google のフロントエンド（GFE）が `/healthz` というパスだけを横取りし、コンテナに渡さずに自前の 404 ページを返す。** サービスの設定や Terraform とは無関係だった。
 
-比較対象（同じプロジェクト・同じリージョン、gcloud でデプロイ）はどちらも認証なしで **403（フロントエンドに到達し IAM で拒否）**:
+- `poc-app` が Ready・ingress `all`・トラフィック 100% で、DNS も正常なのに、認証あり／なしとも Google の汎用 404 ページ（本文に「The requested URL `/healthz` was not found on this server」）が返り、リクエストログも残らなかった
+- 同じプロジェクト・リージョンで gcloud から作った `hello` / `poc-app-test` は 403（フロントエンドに到達）だったため、「Terraform で作ったサービスだけ 404」と誤認した。**実際は 404 側の確認がすべて `/healthz`、403 側の確認がすべて `/`（ルート）だった**。パスの違いを見落として、次の切り分けを無駄にした
+  1. サービス名だけ変えて作り直す（`service_name` 変数を追加）→ 404
+  2. gcloud（v1 API）で更新して新リビジョンを作る → 404
+  3. サービスを削除して作り直す → 404
+  4. `roles/run.invoker` バインディングを外す → 404
+  5. 同じ定義を gcloud `services replace` で作る → 404
+  6. 最小の定義を v2 REST API で作る → 403（`/` を確認していた）
+  7. `poc-app-test` との差分 6 点（ラベル / startup probe / `mountOptions` / アノテーション / 環境変数 / cpu 表記）を 1 点ずつ外す → 全部 404
+- 同じ現象の報告: [Cloud Run Service Returns Google 404 Despite Being Healthy（Google Developer forums）](https://discuss.google.dev/t/platform-block-cloud-run-service-returns-google-404-despite-being-healthy-and-publicly-configured/193122)、[/healthz is unreachable on run.app（GitHub issue）](https://github.com/coldworkshq/doug/issues/300)。`/health` `/healthz/...` `/livez` `/readyz` など `/healthz` 以外は通る
+- startup probe の `/healthz` は Cloud Run が**コンテナに直接**打つのでフロントエンドを通らず、リビジョンは Ready になっていた。そのため「Ready なのに 404」に見えた
 
-- `hello`: Google のサンプルイメージ
-- `poc-app-test`: `poc-app` と同じイメージ・同じ設定（SA、gen2、Cloud Storage ボリューム、環境変数、`--no-allow-unauthenticated`）。`describe --format=export` の差分は Terraform のラベル（`goog-terraform-provisioned`）、`minScale` / `cpu-throttling` / `sessionAffinity` アノテーション、startup probe（httpGet と既定の tcpSocket）、`WRITE_MODE`、cpu 表記（`1` と `1000m`）、`mountOptions` だけで、経路に影響する項目は無い
-
-試したこと（いずれも **変化なし、404**）:
-
-1. `service_name` 変数を追加し、サービス名（= run.app のホスト名）だけを変えて `poc-web` として作り直す → ホスト名の経路情報の残留ではない
-2. `poc-web` を gcloud（v1 API）で更新（`--update-labels touch=1`、新リビジョン `poc-web-00002-24j`）→ v1 API で新リビジョンを作っても直らない。サービスオブジェクト側の問題
-3. v2 API で `poc-web` を GET → `iapEnabled` / `defaultUriDisabled` / `invokerIamDisabled` は未設定（false）、`ingress: INGRESS_TRAFFIC_ALL`、`launchStage: GA`、`urls` に両形式の URL あり。異常値なし
-
-4. サービスを削除して Terraform で作り直す → 404（毎回再現する。オブジェクトの一時的な破損ではない）
-5. `invoker_member` を空にして `roles/run.invoker` バインディングを外す → 404（IAM は無関係）
-6. Terraform のサービスを `describe --format=export` した定義（ラベル込み）を、名前だけ変えて gcloud `services replace`（v1 API）で作る → **404**
-7. 最小の定義（サンプルイメージ、gen1、ボリューム無し）を v2 REST API で直接作る → **403（到達）**
-
-6・7 より、原因は API の種類（v1 / v2、Terraform / gcloud）ではなく**サービス定義の中身**。`poc-app-test`（403）との差分 6 点（Terraform のラベル、httpGet の startup probe、`mountOptions`、`minScale` / `cpu-throttling` / `sessionAffinity` アノテーション、`WRITE_MODE` と cpu 表記）を 1 点ずつ外して特定する。結果は「6. 実機での確認結果」に記録する。
+対処: 死活確認のパスを `/healthz` から **`/health`** に変更（`app/public/index.php`、`terraform/gcp/cloudrun.tf` の startup probe、`scripts/smoke.sh`、CLAUDE.md、docs/02）。教訓: 「到達できない」の比較は**同じパス**で行う。最初に `/` と `/healthz` の両方を確認していれば 1 回で判った。
 
 ### つまずいた点 6: `-var invoker_member=` の apply で Cloud Run サービスごと削除された（2026-09-14）
 

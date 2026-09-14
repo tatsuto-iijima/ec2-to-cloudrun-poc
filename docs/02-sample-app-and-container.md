@@ -9,14 +9,14 @@
 - 当初は S3 モックに MinIO を使う計画だったが、`minio/minio` と `minio/mc` が Docker Hub から削除されていて pull できなかったため（5. 参照）、Claude Code の作業環境での検証にも使っている moto（`motoserver/moto`）に置き換えた
 - **アプリ本体は PHP 内蔵サーバー + moto（S3 互換モック）で検証済み**。`WRITE_MODE=lock` / `rename` の両方でスモークテストが全項目 PASS し、S3 オブジェクトの内容がローカル JSON と一致した
 - **Docker（実行イメージ）でも確認済み**。Claude Code の作業環境には Docker デーモンが無いため、ユーザーの手元の Dev Container（`app` サービス、`target: dev`）で「4. 手元での確認手順」を実施し、`scripts/smoke.sh` が S3 確認まで含めて 6 項目 ALL PASS（「5. Docker での確認結果」参照）
-- Issue #4 の合否基準「`POST /update` で JSON が更新され、S3 にオブジェクトが PUT される」「`/healthz` が 200」は、内蔵サーバー + moto と Docker の両方で満たしている
+- Issue #4 の合否基準「`POST /update` で JSON が更新され、S3 にオブジェクトが PUT される」「`/health` が 200」は、内蔵サーバー + moto と Docker の両方で満たしている
 
 ## 2. 構成
 
 ```
 app/
   composer.json / composer.lock   aws/aws-sdk-php ^3.300、PSR-4 App\ → src/。platform.php=8.3.0 で解決
-  public/index.php                フロントコントローラ。GET / , POST /update, GET /healthz。それ以外は 404
+  public/index.php                フロントコントローラ。GET / , POST /update, GET /health。それ以外は 404
   src/Config.php                  環境変数の読み取りと既定値。WRITE_MODE の検証
   src/JsonStore.php               DATA_DIR/DATA_FILE の読み書き。lock（file_put_contents + LOCK_EX）/ rename（一時ファイル + rename）
   src/S3Uploader.php              AWS SDK S3Client で PUT。S3_ENDPOINT があればパススタイル。認証は SDK の既定チェーン
@@ -32,7 +32,7 @@ docker-compose.yml                app + s3mock（motoserver/moto）+ s3mock-init
 .env.example                      moto 用の既定値（認証情報は任意の文字列）。実 S3 は S3_ENDPOINT= を空にして AWS_* を差し替える
 .gitignore                        vendor/, .env, data/*.json, Terraform の state / tfvars, 鍵ファイル
 data/.gitkeep                     ローカルの DATA_DIR（bind mount 先）
-scripts/smoke.sh                  healthz → GET / → POST /update → 表示確認 → data/data.json 確認 →（aws CLI があれば）S3 確認
+scripts/smoke.sh                  health → GET / → POST /update → 表示確認 → data/data.json 確認 →（aws CLI があれば）S3 確認
 ```
 
 ### 現行アプリとの対応
@@ -47,7 +47,7 @@ scripts/smoke.sh                  healthz → GET / → POST /update → 表示�
 
 ### 設計上の決定
 
-- **`GET /healthz` はファイルにも S3 にも触らない**。#9 のコールドスタート計測で「マウント先アクセスなし」の基準にする
+- **`GET /health` はファイルにも S3 にも触らない**。#9 のコールドスタート計測で「マウント先アクセスなし」の基準にする
 - **`POST /update` は read / write / put の所要時間を `error_log` に 1 行で出す**。#7 #8 の計測はこのログを集計する
   ```
   update key=smoke mode=lock read=0.0ms write=0.3ms put=133.2ms target=s3://poc-bucket/data.json etag="509cb2..."
@@ -67,9 +67,9 @@ scripts/smoke.sh                  healthz → GET / → POST /update → 表示�
 | 1 | `composer install` が通り `composer.lock` が生成される（aws/aws-sdk-php 3.395.0） | OK |
 | 2 | `php -l` で全 PHP ファイルの構文チェック | OK（5 ファイル） |
 | 3 | `JsonStore` を直接呼び、lock / rename の両方式で 新規作成 → 上書き → 再読込 が成立し、一時ファイルが残らない。不正な `WRITE_MODE` は例外 | OK |
-| 4 | `GET /healthz` → 200 `{"status":"ok"}` | OK |
+| 4 | `GET /health` → 200 `{"status":"ok"}` | OK |
 | 5 | `GET /` → 200、`GET /nope` → 404、`POST /update` で不正な key → 303 `/?error=...` | OK |
-| 6 | `scripts/smoke.sh`（`WRITE_MODE=lock`）: healthz / index / update 303 / 表示 / `data/data.json` の 5 項目 | **ALL PASS** |
+| 6 | `scripts/smoke.sh`（`WRITE_MODE=lock`）: health / index / update 303 / 表示 / `data/data.json` の 5 項目 | **ALL PASS** |
 | 7 | moto 上の `s3://poc-bucket/data.json` の内容が `data/data.json` と一致、`Content-Type: application/json; charset=utf-8` | OK（MATCH） |
 | 8 | `scripts/smoke.sh`（`WRITE_MODE=rename`）と S3 一致 | **ALL PASS** / MATCH |
 | 9 | 存在しないバケットへの PUT → 500 とメッセージ、`error_log` に例外クラスとメッセージ | OK |
@@ -162,7 +162,7 @@ S3 モック上のオブジェクト確認で `Command 'aws' not found`。ホス
 
 ```
 $ scripts/smoke.sh
-PASS: GET /healthz -> 200
+PASS: GET /health -> 200
 PASS: GET / -> 200
 PASS: POST /update -> 303
 PASS: GET / に更新後の値が表示される
@@ -185,7 +185,7 @@ $ aws --endpoint-url http://s3mock:5000 s3 cp s3://poc-bucket/data.json -
 |---|---|
 | Dev Container の起動（compose スタック app / s3mock / s3mock-init / data-init、`composer install`） | OK |
 | AWS CLI（features で導入） | OK |
-| `scripts/smoke.sh`（healthz / index / update / 表示 / `/mnt/data/data.json` / S3 オブジェクト） | **ALL PASS**（6 項目） |
+| `scripts/smoke.sh`（health / index / update / 表示 / `/mnt/data/data.json` / S3 オブジェクト） | **ALL PASS**（6 項目） |
 | S3 モック上のオブジェクトの内容 | `counter: 2`、更新値と `updated_at` が入っている |
 | `WRITE_MODE=rename` | Docker 上では未実施（内蔵サーバーでは PASS 済み。#7 の gcsfuse 検証で両方式を改めて確認する） |
 
