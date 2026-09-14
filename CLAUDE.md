@@ -70,7 +70,7 @@ README.md         リポジトリの概要
 app/              サンプル PHP アプリ（public/, src/, composer.json）
 docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / composer / gcloud CLI）, Apache 設定
 docker-compose.yml ローカル起動用
-cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registry へ push（--target runtime）
+cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registry へ push（--target runtime。scripts/build-push.sh から実行）
 .gcloudignore     Cloud Build に送らないファイル
 terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state はローカル）
 terraform/aws/    S3 / IAM ロール（Google OIDC 信頼）
@@ -194,8 +194,7 @@ gcloud config set project <PROJECT_ID>
 cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # project_id, invoker_member を記入
 
 terraform -chdir=terraform/gcp init && terraform -chdir=terraform/gcp apply   # 1 回目: API / AR / バケット / SA
-gcloud builds submit --config cloudbuild.yaml \
-  --substitutions _IMAGE=$(terraform -chdir=terraform/gcp output -raw image_uri),_BUILD_SA=$(terraform -chdir=terraform/gcp output -raw build_service_account_email),SHORT_SHA=$(git rev-parse --short HEAD) .
+scripts/build-push.sh                                                          # Cloud Build で --target runtime をビルドして push（terraform output から substitution を組み立てる）
 terraform -chdir=terraform/gcp apply -var image=$(terraform -chdir=terraform/gcp output -raw image_uri):$(git rev-parse --short HEAD)   # 2 回目: Cloud Run
 
 URL=$(terraform -chdir=terraform/gcp output -raw service_url)
