@@ -195,7 +195,7 @@ cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # pro
 
 terraform -chdir=terraform/gcp init && terraform -chdir=terraform/gcp apply   # 1 回目: API / AR / バケット / SA
 gcloud builds submit --config cloudbuild.yaml \
-  --substitutions _IMAGE=$(terraform -chdir=terraform/gcp output -raw image_uri),SHORT_SHA=$(git rev-parse --short HEAD) .
+  --substitutions _IMAGE=$(terraform -chdir=terraform/gcp output -raw image_uri),_BUILD_SA=$(terraform -chdir=terraform/gcp output -raw build_service_account_email),SHORT_SHA=$(git rev-parse --short HEAD) .
 terraform -chdir=terraform/gcp apply -var image=$(terraform -chdir=terraform/gcp output -raw image_uri):$(git rev-parse --short HEAD)   # 2 回目: Cloud Run
 
 URL=$(terraform -chdir=terraform/gcp output -raw service_url)
