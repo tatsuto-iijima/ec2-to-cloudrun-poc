@@ -21,8 +21,11 @@ app/
   src/JsonStore.php               DATA_DIR/DATA_FILE の読み書き。lock（file_put_contents + LOCK_EX）/ rename（一時ファイル + rename）
   src/S3Uploader.php              AWS SDK S3Client で PUT。S3_ENDPOINT があればパススタイル。認証は SDK の既定チェーン
   templates/index.php             現在値の表と更新フォーム。フッターに WRITE_MODE / DATA_DIR / S3 先を表示
+.devcontainer/
+  devcontainer.json               docker-compose.yml の app サービスをベースにした Dev Container。features で AWS CLI / Terraform / vscode ユーザーを追加
+  docker-compose.yml              app への上書き（build.target=dev、/workspace と app/ の bind mount）
 docker/
-  Dockerfile                      multi-stage: composer:2 で vendor 生成 → php:8.3-apache。ENV PORT=8080, DATA_DIR=/mnt/data, WRITE_MODE=lock
+  Dockerfile                      multi-stage: composer:2 で vendor 生成 → runtime（php:8.3-apache。ENV PORT=8080, DATA_DIR=/mnt/data, WRITE_MODE=lock）→ dev（runtime + git / composer）
   apache/ports.conf               Listen ${PORT}
   apache/000-default.conf         DocumentRoot /var/www/html/public、FallbackResource /index.php、ログは /proc/self/fd/1,2
 docker-compose.yml                app + s3mock（motoserver/moto）+ s3mock-init（amazon/aws-cli でバケット作成）+ data-init（./data を uid 33 に chown）
@@ -74,6 +77,20 @@ scripts/smoke.sh                  healthz → GET / → POST /update → 表示�
 所要時間ログ（参考。ローカル FS + moto）: `read=0.0ms write=0.3ms put=120〜133ms`
 
 ## 4. 手元での確認手順（Docker。未実施）
+
+### Dev Container で実施する場合（推奨）
+
+VS Code で「Reopen in Container」する。`.env` が無ければ `.env.example` からコピーされ、compose スタック（app / s3mock / s3mock-init / data-init）が起動して、コンテナ内で `composer install` が走る。コンテナ内のターミナルで:
+
+```bash
+aws --version                                                             # AWS CLI が入っていること
+scripts/smoke.sh                                                          # BASE_URL / DATA_DIR / S3_* / AWS_* は設定済み。S3 確認まで ALL PASS
+aws --endpoint-url http://s3mock:5000 s3 cp s3://poc-bucket/data.json -   # S3 モック上のオブジェクト
+```
+
+`WRITE_MODE=rename` で確認するときは、ホスト側で `WRITE_MODE=rename docker compose -f docker-compose.yml -f .devcontainer/docker-compose.yml up -d app` してから再度 `scripts/smoke.sh`。
+
+### ホストで直接実施する場合
 
 ```bash
 cp .env.example .env
@@ -129,6 +146,16 @@ echo https://index.docker.io/v1/ | docker-credential-desktop get   # ヘルパ�
 | Linux | `credsStore` が `pass` / `secretservice` で未初期化 | `pass init` するか、下の共通対処 |
 | 共通 | 公開イメージしか使わない | `~/.docker/config.json` をバックアップし、`"credsStore"` 行を削除して再実行 |
 
+### つまずいた点 3: ホストに `aws` が無い（2026-09-14）
+
+S3 モック上のオブジェクト確認で `Command 'aws' not found`。ホストに AWS CLI を入れる代わりに **Dev Container** を追加した。
+
+- `docker-compose.yml` の `app` サービス自体を Dev Container にする（`dockerComposeFile` + `service: app`）。開発環境 = 実行イメージ（`php:8.3-apache`）で、Apache が動いたまま `app/` の編集が即反映される
+- `docker/Dockerfile` に `dev` ステージ（`runtime` + git / unzip / composer）を追加。実行イメージ `runtime` には含めない。最終ステージが `dev` になるため、`docker-compose.yml` と #5 の Cloud Run 用ビルドでは `--target runtime` を明示する
+- AWS CLI / Terraform は Dev Container の features で載せる。作業ユーザーは `common-utils` feature で作る `vscode`（uid 1000）。Apache の worker は従来どおり `www-data`
+- `app/` を `/var/www/html` に bind mount するとイメージ内の `vendor/` が隠れるため、`postCreateCommand` で `composer install`（ホストの `app/vendor` に生成。`.gitignore` 済み）
+- コンテナ内に Docker CLI は無いので、compose の操作（`WRITE_MODE` の切り替え等）はホスト側で行う
+
 ### スモークテストの結果
 
 （未実施。上記の対処後に手元で確認して追記）
@@ -140,3 +167,4 @@ echo https://index.docker.io/v1/ | docker-credential-desktop get   # ヘルパ�
 - **ログ**: access / error ログは stdout / stderr。Cloud Logging での見え方は #10 で評価
 - **イメージサイズ**: `php:8.3-apache` + vendor（AWS SDK）で 500MB 前後になる見込み。コールドスタートへの影響は #9 で計測
 - **環境変数**: `DATA_DIR=/mnt/data`、`S3_BUCKET`、`AWS_REGION` を Cloud Run の環境変数で渡す。`AWS_ACCESS_KEY_ID` 等は渡さない（#6 で WIF）
+- **ビルドターゲット**: Cloud Run 用イメージは `docker build --target runtime -f docker/Dockerfile .`。`dev` ステージ（git / composer 入り）を含めない
