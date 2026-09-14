@@ -146,6 +146,7 @@ docker compose down             # 後片付け（moto のデータはメモリ�
 - `./data` はコンテナの `/mnt/data` に bind mount される。`data-init` が `uid 33`（www-data）に chown するので、ホスト側で書き込む場合は権限に注意
 - 実 S3 を使う場合は `.env` で `S3_ENDPOINT=`（空）にし、`AWS_*` に実際の認証情報を入れる
 - S3 モックに moto（`motoserver/moto`）を使うのは、MinIO の公式イメージ（`minio/minio`, `minio/mc`）が Docker Hub から削除されていて pull できないため（2026-09 確認）
+- pull 中に `error getting credentials - err: exit status 1, out: ``` が出たら、`~/.docker/config.json` の `credsStore`（Docker Desktop の認証ヘルパー）が失敗している。使うイメージはすべて公開イメージなので `docker login` は不要。対処は `docs/02` の「つまずいた点 2」
 
 ### PHP 内蔵サーバー + moto（Docker が使えない環境。Claude Code の作業環境はこちら）
 
