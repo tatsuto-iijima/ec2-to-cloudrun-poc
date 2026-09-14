@@ -20,11 +20,11 @@ terraform/gcp/
   apis.tf                     run / artifactregistry / cloudbuild / iam / storage を有効化（destroy で無効化しない）
   registry.tf                 Artifact Registry（Docker）。image_uri = REGION-docker.pkg.dev/PROJECT/poc-app/app
   storage.tf                  作業領域バケット PROJECT-poc-data（uniform access、公開防止、force_destroy）
-  iam.tf                      Cloud Run 実行用 SA（バケットに roles/storage.objectUser）。Cloud Build 用に Compute 既定 SA へ artifactregistry.writer / logging.logWriter
+  iam.tf                      Cloud Run 実行用 SA（バケットに roles/storage.objectUser）。Cloud Build 専用 SA（ソース用バケット PROJECT_ID_cloudbuild に objectViewer、AR に artifactregistry.writer、logging.logWriter）
   cloudrun.tf                 Cloud Run v2 サービス（下記）と invoker の IAM
-  outputs.tf                  image_uri / bucket_name / service_account_email / service_account_unique_id / service_url / service_name
+  outputs.tf                  image_uri / bucket_name / service_account_email / build_service_account_email / service_account_unique_id / service_url / service_name
   terraform.tfvars.example    project_id / invoker_member / image の見本
-cloudbuild.yaml               docker build --target runtime -f docker/Dockerfile → ${_IMAGE}:${SHORT_SHA} と :latest を push
+cloudbuild.yaml               docker build --target runtime -f docker/Dockerfile → ${_IMAGE}:${SHORT_SHA} と :latest を push。serviceAccount は Terraform で作った Cloud Build 用 SA（${_BUILD_SA}）
 .gcloudignore                 Cloud Build に送らないファイル（vendor、data、docs、terraform など）
 docker/Dockerfile             dev ステージに gcloud CLI を追加（公式 apt リポジトリ、signed-by 方式。実行イメージ runtime には含めない）
 ```
@@ -67,9 +67,9 @@ cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # pro
 terraform -chdir=terraform/gcp init
 terraform -chdir=terraform/gcp apply
 
-# イメージのビルドと push（Cloud Build。--target runtime）
+# イメージのビルドと push（Cloud Build。--target runtime。専用 SA でビルド）
 gcloud builds submit --config cloudbuild.yaml \
-  --substitutions _IMAGE=$(terraform -chdir=terraform/gcp output -raw image_uri),SHORT_SHA=$(git rev-parse --short HEAD) .
+  --substitutions _IMAGE=$(terraform -chdir=terraform/gcp output -raw image_uri),_BUILD_SA=$(terraform -chdir=terraform/gcp output -raw build_service_account_email),SHORT_SHA=$(git rev-parse --short HEAD) .
 
 # 2 回目の apply（Cloud Run サービス）。image は tfvars に書いてもよい
 terraform -chdir=terraform/gcp apply -var image=$(terraform -chdir=terraform/gcp output -raw image_uri):$(git rev-parse --short HEAD)
@@ -139,6 +139,16 @@ ERROR: Feature "Google Cloud CLI" (ghcr.io/dhoeric/features/google-cloud-cli) fa
 対処: feature をやめ、`docker/Dockerfile` の `dev` ステージで公式手順（`/usr/share/keyrings/cloud.google.gpg` + `signed-by`）により `google-cloud-cli` を入れる。Google の apt リポジトリは amd64 / arm64 の両方を提供しているので Apple Silicon でも動く。実行イメージ `runtime` には含めない。
 
 補足: Apple Silicon の Dev Container は arm64 イメージをビルドするが、Cloud Run 用イメージは Cloud Build が linux/amd64 でビルドするので影響しない。Claude Code の作業環境からは `packages.cloud.google.com` に到達できないため（プロキシで遮断）、この Dockerfile の変更はユーザーの手元の「Rebuild Container」で確認する。
+
+### つまずいた点 2: 1 回目の `terraform apply` で Compute 既定 SA が存在しないと言われる（2026-09-14）
+
+```
+Error 400: Service account 912851559962-compute@developer.gserviceaccount.com does not exist.
+  with google_project_iam_member.cloud_build_log_writer
+```
+
+原因: Cloud Build の実行 SA として Compute Engine の既定 SA（`PROJECT_NUMBER-compute@developer.gserviceaccount.com`）を想定していたが、この SA は Compute Engine API を有効にしたときに作られるもので、新規プロジェクトには存在しない。組織によっては組織ポリシーで既定 SA が無効化されている。
+対処: Compute Engine API は有効化せず、Terraform で **Cloud Build 専用の SA**（`poc-build`）を作って必要最小限の権限（ソース用バケット `PROJECT_ID_cloudbuild` の `objectViewer`、Artifact Registry の `writer`、`logging.logWriter`）を付け、`cloudbuild.yaml` の `serviceAccount` で指定する。ユーザー指定の SA でビルドする場合は `options.logging` の指定が必須なので `CLOUD_LOGGING_ONLY` を維持する。`gcloud builds submit` を実行する人には、この SA に対する `roles/iam.serviceAccountUser`（プロジェクトのオーナーなら不要）が必要。
 
 ## 6. 実機での確認結果
 
