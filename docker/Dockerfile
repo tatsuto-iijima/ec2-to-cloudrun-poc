@@ -33,10 +33,18 @@ WORKDIR /var/www/html
 EXPOSE 8080
 
 # ---- 開発用（Dev Container）。実行イメージ runtime には含めない ----
-# runtime と同じ Apache/PHP のまま、git / composer など開発に必要なツールだけを足す。
-# AWS CLI や Terraform は .devcontainer/devcontainer.json の features で載せる
+# runtime と同じ Apache/PHP のまま、git / composer / gcloud など開発に必要なツールだけを足す。
+# AWS CLI と Terraform は .devcontainer/devcontainer.json の features で載せる。
+# gcloud CLI はここで入れる。コミュニティの devcontainer feature は apt-key を使うため、
+# ベースの Debian trixie（apt-key 廃止）では失敗する（docs/03 参照）
 FROM runtime AS dev
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git unzip less \
+    && apt-get install -y --no-install-recommends git unzip less ca-certificates curl gnupg \
+    # gcloud CLI: 公式 apt リポジトリを signed-by 方式で登録する（amd64 / arm64 両対応）
+    && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+        > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-cloud-cli \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # サンプルアプリのスモークテスト。
-#   1. GET /healthz が 200 で {"status":"ok"}
+#   1. GET /health が 200 で {"status":"ok"}
 #   2. GET / が 200
 #   3. POST /update が 303 で / にリダイレクトし、更新した値が表示される
 #   4. DATA_DIR/DATA_FILE（指定時）に更新した値が書かれている
@@ -23,10 +23,10 @@ fail=0
 pass() { echo "PASS: $*"; }
 ng() { echo "FAIL: $*"; fail=1; }
 
-# 1. healthz
-body=$(curl -sS -w '\n%{http_code}' "$BASE_URL/healthz")
+# 1. health
+body=$(curl -sS -w '\n%{http_code}' "$BASE_URL/health")
 code=${body##*$'\n'}
-if [[ "$code" == "200" && "$body" == *'"status":"ok"'* ]]; then pass "GET /healthz -> 200"; else ng "GET /healthz -> $code"; fi
+if [[ "$code" == "200" && "$body" == *'"status":"ok"'* ]]; then pass "GET /health -> 200"; else ng "GET /health -> $code"; fi
 
 # 2. index
 code=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE_URL/")

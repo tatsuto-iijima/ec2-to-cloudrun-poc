@@ -1,0 +1,13 @@
+# gcloud builds submit で Cloud Build に送らないファイル。
+# ビルドに必要なのは docker/、app/（vendor を除く）、cloudbuild.yaml だけ
+.git/
+.gitignore
+.env
+.env.example
+.devcontainer/
+app/vendor/
+data/
+docs/
+scripts/
+terraform/
+node_modules/

@@ -23,7 +23,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 
 | 項目 | 選定 |
 |---|---|
-| コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
+| コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer / gcloud CLI 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
 | 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1` |
 | 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す |
 | IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割 |
@@ -45,7 +45,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 
 - `GET /` : JSON の現在値を表示し、更新フォームを出す
 - `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303。各段階の所要時間（ms）を `error_log` に 1 行出す
-- `GET /healthz` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）
+- `GET /health` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）。**`/healthz` は使わない**: Cloud Run の予約済み URL パス（`/eventlog`、`/_ah/` で始まるパス、**末尾が `z` のパス**）は Google のフロントエンドが横取りして 404 を返し、コンテナに届かない。経路を足すときもこの 3 種は避ける（Cloud Run の既知の問題「予約済みの URL パス」。docs/03 つまずいた点 5）
 - コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/S3Uploader.php`（S3 PUT）、`app/templates/index.php`（画面）
 
 | 環境変数 | 既定 | 説明 |
@@ -66,11 +66,13 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 ```
 CLAUDE.md         このファイル（AI 駆動開発の前提・ルール）
 README.md         リポジトリの概要
-.devcontainer/    Dev Container（docker-compose.yml の app サービスをベースに AWS CLI / Terraform を同梱）
+.devcontainer/    Dev Container（docker-compose.yml の app サービスをベース。AWS CLI / Terraform は features、gcloud は Dockerfile の dev ステージ）
 app/              サンプル PHP アプリ（public/, src/, composer.json）
-docker/           Dockerfile（runtime / dev の 2 ステージ）, Apache 設定
+docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / composer / gcloud CLI）, Apache 設定
 docker-compose.yml ローカル起動用
-terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry
+cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registry へ push（--target runtime。scripts/build-push.sh から実行）
+.gcloudignore     Cloud Build に送らないファイル
+terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state はローカル）
 terraform/aws/    S3 / IAM ロール（Google OIDC 信頼）
 scripts/          計測スクリプト（コールドスタート、処理時間、読み書き）
 docs/             検証レポート（検証項目ごとに 1 ファイル）+ 最終判定
@@ -136,7 +138,7 @@ docs/             検証レポート（検証項目ごとに 1 ファイル）+ 
 # コンテナ内のターミナルで（BASE_URL / DATA_DIR / S3_* / AWS_* は設定済み）
 scripts/smoke.sh                                                        # S3 の確認まで含めて ALL PASS になる
 aws --endpoint-url http://s3mock:5000 s3 cp s3://poc-bucket/data.json - # S3 モック上のオブジェクト
-curl -s http://localhost:8080/healthz
+curl -s http://localhost:8080/health
 ```
 
 - `WRITE_MODE=rename` への切り替えなど compose の操作（再起動、`down`）はホスト側のターミナルで行う（コンテナ内に Docker CLI は無い）
@@ -149,7 +151,7 @@ cp .env.example .env            # 初回のみ。moto 用の既定値が入っ�
 docker compose up --build -d    # app(8080) / s3mock(ホスト 9000 → コンテナ 5000) / s3mock-init / data-init
 docker compose logs -f app      # Apache のログ（update の所要時間もここに出る）
 
-# スモークテスト（healthz → GET / → POST /update → data/data.json の確認）
+# スモークテスト（health → GET / → POST /update → data/data.json の確認）
 BASE_URL=http://localhost:8080 DATA_DIR=./data scripts/smoke.sh
 
 # S3 モック上のオブジェクトを確認（aws CLI がある場合。認証情報は任意の値でよい）
@@ -184,10 +186,28 @@ BASE_URL=http://127.0.0.1:8080 DATA_DIR=$PWD/data scripts/smoke.sh
 - 構文チェック: `for f in app/public/index.php app/templates/index.php app/src/*.php; do php -l "$f"; done`
 - サーバーを止めるときは `pkill -f "^php -S"`（`pkill -f "php -S"` は自分のシェルにも一致することがある）
 
-### クラウド（#5 以降で確定次第置き換える）
+### GCP（Dev Container 内で実施。詳細は `docs/03`）
 
 ```bash
-cd terraform/gcp && terraform init && terraform plan && terraform apply   # GCP 基盤
-cd terraform/aws && terraform init && terraform plan && terraform apply   # AWS 側（#6 以降）
-terraform destroy                                                          # 後片付け
+gcloud auth login --no-launch-browser && gcloud auth application-default login --no-launch-browser
+gcloud config set project <PROJECT_ID>
+cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # project_id, invoker_member を記入
+
+terraform -chdir=terraform/gcp init && terraform -chdir=terraform/gcp apply   # 1 回目: API / AR / バケット / SA
+scripts/build-push.sh                                                          # Cloud Build で --target runtime をビルドして push。push したタグを terraform/gcp/image.auto.tfvars に書き出す
+terraform -chdir=terraform/gcp apply                                           # 2 回目: Cloud Run（image は image.auto.tfvars から。-var image は使わない: 空だとサービスが消える）
+
+URL=$(terraform -chdir=terraform/gcp output -raw service_url)
+curl -s -H "Authorization: Bearer $(gcloud auth print-identity-token)" $URL/health      # 非公開なので ID トークン付き
+gcloud run services proxy $(terraform -chdir=terraform/gcp output -raw service_name) --region asia-northeast1 --port 8081   # ブラウザ用
+terraform -chdir=terraform/gcp destroy                                                    # 後片付け
+```
+
+- Cloud Run は非公開（`invoker_member` にだけ `roles/run.invoker`）。`allUsers` には付与しない
+- Claude Code の作業環境では `apply` できない（GCP の認証情報が無い）。`terraform fmt` / `validate` までを行い、`apply` と動作確認はユーザーの手元で実施する。provider は `releases.hashicorp.com` から filesystem mirror で取得する（`registry.terraform.io` は遮断）
+
+### AWS（#6 で確定次第置き換える）
+
+```bash
+cd terraform/aws && terraform init && terraform plan && terraform apply
 ```

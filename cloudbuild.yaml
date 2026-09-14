@@ -1,0 +1,34 @@
+# Cloud Build でサンプルアプリの実行イメージをビルドし、Artifact Registry へ push する。
+# 手元に Docker が無くても Dev Container 内の gcloud から実行できる。
+#
+# 使い方（terraform apply 後）: scripts/build-push.sh
+#   terraform output から _IMAGE / _BUILD_SA を組み立てて gcloud builds submit を実行する。
+#   手で実行する場合は 3 つの substitution をすべて渡す（1 つでも欠けると submit 時にエラーになる）:
+#     gcloud builds submit --config cloudbuild.yaml \
+#       --substitutions _IMAGE=<image_uri>,_BUILD_SA=<build_service_account_email>,SHORT_SHA=<git sha> .
+#
+# 注意: Dockerfile の最終ステージは dev（Dev Container 用）なので、必ず --target runtime を指定する
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --target
+      - runtime
+      - -f
+      - docker/Dockerfile
+      - -t
+      - ${_IMAGE}:${SHORT_SHA}
+      - -t
+      - ${_IMAGE}:latest
+      - .
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:latest
+# Terraform で作った Cloud Build 用 SA（terraform output build_service_account_email）でビルドする。
+# 既定の Compute SA は Compute Engine API を有効にしないと存在しないため使わない
+serviceAccount: projects/${PROJECT_ID}/serviceAccounts/${_BUILD_SA}
+options:
+  # ユーザー指定の SA でビルドする場合はログの保存先指定が必須。Cloud Logging に限定する
+  logging: CLOUD_LOGGING_ONLY
+# _IMAGE / _BUILD_SA に既定値を置かない。空文字の既定値があると指定漏れに気づかず
+# 「Unknown service account」になるため、未指定は submit 時のエラーにする
