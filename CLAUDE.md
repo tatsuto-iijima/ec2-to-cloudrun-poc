@@ -23,7 +23,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 
 | 項目 | 選定 |
 |---|---|
-| コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
+| コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer / gcloud CLI 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
 | 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1` |
 | 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す |
 | IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割 |
@@ -66,9 +66,9 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 ```
 CLAUDE.md         このファイル（AI 駆動開発の前提・ルール）
 README.md         リポジトリの概要
-.devcontainer/    Dev Container（docker-compose.yml の app サービスをベースに AWS CLI / Terraform を同梱）
+.devcontainer/    Dev Container（docker-compose.yml の app サービスをベース。AWS CLI / Terraform は features、gcloud は Dockerfile の dev ステージ）
 app/              サンプル PHP アプリ（public/, src/, composer.json）
-docker/           Dockerfile（runtime / dev の 2 ステージ）, Apache 設定
+docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / composer / gcloud CLI）, Apache 設定
 docker-compose.yml ローカル起動用
 cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registry へ push（--target runtime）
 .gcloudignore     Cloud Build に送らないファイル
