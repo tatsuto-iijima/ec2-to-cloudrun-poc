@@ -8,8 +8,8 @@
 - 現行アプリの「ローカル FS 上の JSON を読み書きし、S3 へアップロード」を再現するサンプル PHP アプリを `app/` に作成し、`php:8.3-apache` ベースの Dockerfile と、S3 モック（moto）を同梱した `docker-compose.yml` を用意した
 - 当初は S3 モックに MinIO を使う計画だったが、`minio/minio` と `minio/mc` が Docker Hub から削除されていて pull できなかったため（5. 参照）、Claude Code の作業環境での検証にも使っている moto（`motoserver/moto`）に置き換えた
 - **アプリ本体は PHP 内蔵サーバー + moto（S3 互換モック）で検証済み**。`WRITE_MODE=lock` / `rename` の両方でスモークテストが全項目 PASS し、S3 オブジェクトの内容がローカル JSON と一致した
-- **Docker イメージのビルドと `docker compose up` は、Claude Code の作業環境に Docker デーモンが無いため未検証**。手元の Docker で「4. 手元での確認手順」を実施して結果を本レポートに追記する
-- Issue #4 の合否基準「`POST /update` で JSON が更新され、S3 にオブジェクトが PUT される」「`/healthz` が 200」は、内蔵サーバー + moto の範囲で満たしている
+- **Docker（実行イメージ）でも確認済み**。Claude Code の作業環境には Docker デーモンが無いため、ユーザーの手元の Dev Container（`app` サービス、`target: dev`）で「4. 手元での確認手順」を実施し、`scripts/smoke.sh` が S3 確認まで含めて 6 項目 ALL PASS（「5. Docker での確認結果」参照）
+- Issue #4 の合否基準「`POST /update` で JSON が更新され、S3 にオブジェクトが PUT される」「`/healthz` が 200」は、内蔵サーバー + moto と Docker の両方で満たしている
 
 ## 2. 構成
 
@@ -156,9 +156,40 @@ S3 モック上のオブジェクト確認で `Command 'aws' not found`。ホス
 - `app/` を `/var/www/html` に bind mount するとイメージ内の `vendor/` が隠れるため、`postCreateCommand` で `composer install`（ホストの `app/vendor` に生成。`.gitignore` 済み）
 - コンテナ内に Docker CLI は無いので、compose の操作（`WRITE_MODE` の切り替え等）はホスト側で行う
 
-### スモークテストの結果
+### スモークテストの結果（2026-09-14、Dev Container 内で実施）
 
-（未実施。上記の対処後に手元で確認して追記）
+実施環境: Ubuntu ホスト + Docker、VS Code の Dev Container（`app` サービス、`target: dev`）。`WRITE_MODE=lock`。
+
+```
+$ scripts/smoke.sh
+PASS: GET /healthz -> 200
+PASS: GET / -> 200
+PASS: POST /update -> 303
+PASS: GET / に更新後の値が表示される
+PASS: /mnt/data/data.json に書かれている
+PASS: s3://poc-bucket/data.json に同じ内容がある
+ALL PASS
+```
+
+```
+$ aws --endpoint-url http://s3mock:5000 s3 cp s3://poc-bucket/data.json -
+{
+    "message": "EC2 to Cloud Run PoC",
+    "counter": 2,
+    "smoke": "ok-1789359869",
+    "updated_at": "2026-09-14T04:24:29+00:00"
+}
+```
+
+| 確認内容 | 結果 |
+|---|---|
+| Dev Container の起動（compose スタック app / s3mock / s3mock-init / data-init、`composer install`） | OK |
+| AWS CLI（features で導入） | OK |
+| `scripts/smoke.sh`（healthz / index / update / 表示 / `/mnt/data/data.json` / S3 オブジェクト） | **ALL PASS**（6 項目） |
+| S3 モック上のオブジェクトの内容 | `counter: 2`、更新値と `updated_at` が入っている |
+| `WRITE_MODE=rename` | Docker 上では未実施（内蔵サーバーでは PASS 済み。#7 の gcsfuse 検証で両方式を改めて確認する） |
+
+これで Issue #4 の合否基準は実行イメージ（`php:8.3-apache`）上でも満たした。
 
 ## 6. #5（Cloud Run デプロイ）へ引き継ぐ事項
 
