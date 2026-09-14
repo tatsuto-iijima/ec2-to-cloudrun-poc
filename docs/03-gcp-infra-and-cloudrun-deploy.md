@@ -51,7 +51,7 @@ Cloud Run サービスはイメージが Artifact Registry に存在しないと
 
 1. `terraform apply`（`image` 未指定）→ API / Artifact Registry / バケット / SA / Cloud Build の権限
 2. `gcloud builds submit` でイメージを push
-3. `terraform apply -var image=<image_uri>:<tag>` → Cloud Run サービス + invoker
+3. `terraform apply`（`image` は `build-push.sh` が書き出す `image.auto.tfvars` から読む）→ Cloud Run サービス + invoker
 
 ## 3. デプロイ手順（Dev Container 内で実施）
 
@@ -76,7 +76,7 @@ scripts/build-push.sh
 terraform -chdir=terraform/gcp apply
 ```
 
-`image.auto.tfvars` は `.gitignore` 済み（`*.tfvars`）。手で `-var image=...` を渡す場合は、`git rev-parse --short HEAD` ではなく**実際に push したタグ**（`build-push.sh` の出力、または `:latest`）を使う。
+`image.auto.tfvars` は `.gitignore` 済み（`*.tfvars`）。**`image` は tfvars ファイルに置き、`-var image=...` で渡さない。** `image` が空だとサービスを「作らない」＝既存サービスを**削除**する設計なので、`-var` 運用だと付け忘れた apply（例: 他の変数だけ変えたいとき）でサービスが消える（つまずいた点 6）。手でタグを直す場合も `image.auto.tfvars` を編集し、`git rev-parse --short HEAD` ではなく**実際に push したタグ**（`build-push.sh` の出力、または `:latest`）を書く。
 
 ## 4. 動作確認手順
 
@@ -169,9 +169,25 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
 
 ### つまずいた点 5: Cloud Run サービスが Ready なのに run.app URL が 404（2026-09-14）
 
-`poc-app` が Ready・ingress `all`・トラフィック 100% で、DNS も正常（Cloud Run の正規 IP）なのに、認証あり／なしとも Google の汎用 404 ページが返り、コンテナにリクエストが届かなかった（リクエストログも無し）。同じリージョンに gcloud でデプロイした `hello`（サンプルイメージ）は認証なしで 403（到達）。同じイメージ・同じ設定で gcloud からデプロイした `poc-app-test` は `describe --format=export` の差分に経路へ影響する項目が無いことまで確認したが、到達可否は未確認。
-試したこと: `service_name` 変数を追加し、サービス名（= run.app のホスト名）だけを変えて `poc-web` として作り直した → **変化なし（404）**。ホスト名の経路情報の残留ではない。
-切り分けの続き（Terraform（v2 API）で作ったサービスだけが 404 になる差を探す）は「6. 実機での確認結果」に記録する。
+`poc-app` が Ready・ingress `all`（`ingress-status: all`、組織ポリシー `run.allowedIngress` は ALLOW all）・トラフィック 100% で、DNS も正常（Cloud Run の正規 IP）なのに、認証あり／なしとも Google の汎用 404 ページが返り、コンテナにリクエストが届かなかった（リクエストログも無し）。
+
+比較対象（同じプロジェクト・同じリージョン、gcloud でデプロイ）はどちらも認証なしで **403（フロントエンドに到達し IAM で拒否）**:
+
+- `hello`: Google のサンプルイメージ
+- `poc-app-test`: `poc-app` と同じイメージ・同じ設定（SA、gen2、Cloud Storage ボリューム、環境変数、`--no-allow-unauthenticated`）。`describe --format=export` の差分は Terraform のラベル（`goog-terraform-provisioned`）、`minScale` / `cpu-throttling` / `sessionAffinity` アノテーション、startup probe（httpGet と既定の tcpSocket）、`WRITE_MODE`、cpu 表記（`1` と `1000m`）、`mountOptions` だけで、経路に影響する項目は無い
+
+試したこと（いずれも **変化なし、404**）:
+
+1. `service_name` 変数を追加し、サービス名（= run.app のホスト名）だけを変えて `poc-web` として作り直す → ホスト名の経路情報の残留ではない
+2. `poc-web` を gcloud（v1 API）で更新（`--update-labels touch=1`、新リビジョン `poc-web-00002-24j`）→ v1 API で新リビジョンを作っても直らない。サービスオブジェクト側の問題
+3. v2 API で `poc-web` を GET → `iapEnabled` / `defaultUriDisabled` / `invokerIamDisabled` は未設定（false）、`ingress: INGRESS_TRAFFIC_ALL`、`launchStage: GA`、`urls` に両形式の URL あり。異常値なし
+
+残る候補は (a) Terraform が付ける `roles/run.invoker` バインディング、(b) ラベル込みの定義、(c) v2 API で作ったサービスオブジェクトそのもの。切り分け（IAM を外す / 同じ定義を gcloud `services replace` で作る）の結果は「6. 実機での確認結果」に記録する。(c) なら Terraform を v1 リソース `google_cloud_run_service`（gen2・Cloud Storage ボリューム対応）に切り替える。
+
+### つまずいた点 6: `-var invoker_member=` の apply で Cloud Run サービスごと削除された（2026-09-14）
+
+原因: 切り分けのために `terraform apply -var invoker_member=` を実行したが、`image` を `-var image=...:latest` で渡す運用のままで `image.auto.tfvars` が無かった（`build-push.sh` の修正前に push したイメージを使っていた）。`image` が空 → `count = 0` → サービスと invoker の 2 リソースが destroy された。
+対処: `image` は `image.auto.tfvars`（または `terraform.tfvars`）に書き、`-var image` は使わない（「3. デプロイ手順」参照）。`image` を空にしてサービスを消すのは意図した操作のときだけ。
 
 ## 6. 実機での確認結果
 
