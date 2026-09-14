@@ -194,8 +194,8 @@ gcloud config set project <PROJECT_ID>
 cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # project_id, invoker_member を記入
 
 terraform -chdir=terraform/gcp init && terraform -chdir=terraform/gcp apply   # 1 回目: API / AR / バケット / SA
-scripts/build-push.sh                                                          # Cloud Build で --target runtime をビルドして push（terraform output から substitution を組み立てる）
-terraform -chdir=terraform/gcp apply -var image=$(terraform -chdir=terraform/gcp output -raw image_uri):$(git rev-parse --short HEAD)   # 2 回目: Cloud Run
+scripts/build-push.sh                                                          # Cloud Build で --target runtime をビルドして push。push したタグを terraform/gcp/image.auto.tfvars に書き出す
+terraform -chdir=terraform/gcp apply                                           # 2 回目: Cloud Run（image は image.auto.tfvars から。-var は不要）
 
 URL=$(terraform -chdir=terraform/gcp output -raw service_url)
 curl -s -H "Authorization: Bearer $(gcloud auth print-identity-token)" $URL/healthz      # 非公開なので ID トークン付き
