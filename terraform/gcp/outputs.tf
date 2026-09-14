@@ -18,6 +18,11 @@ output "service_account_email" {
   value       = google_service_account.run.email
 }
 
+output "build_service_account_email" {
+  description = "Cloud Build 用サービスアカウント（cloudbuild.yaml の serviceAccount に使う）"
+  value       = google_service_account.build.email
+}
+
 output "service_account_unique_id" {
   description = "サービスアカウントの一意 ID（#6 の WIF で accounts.google.com:sub / aud の条件に使う）"
   value       = google_service_account.run.unique_id

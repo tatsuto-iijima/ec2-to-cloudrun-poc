@@ -3,7 +3,7 @@
 #
 # 使い方（terraform apply 後）:
 #   gcloud builds submit --config cloudbuild.yaml \
-#     --substitutions _IMAGE=$(terraform -chdir=terraform/gcp output -raw image_uri),SHORT_SHA=$(git rev-parse --short HEAD) .
+#     --substitutions _IMAGE=$(terraform -chdir=terraform/gcp output -raw image_uri),_BUILD_SA=$(terraform -chdir=terraform/gcp output -raw build_service_account_email),SHORT_SHA=$(git rev-parse --short HEAD) .
 #
 # 注意: Dockerfile の最終ステージは dev（Dev Container 用）なので、必ず --target runtime を指定する
 steps:
@@ -22,9 +22,14 @@ steps:
 images:
   - ${_IMAGE}:${SHORT_SHA}
   - ${_IMAGE}:latest
+# Terraform で作った Cloud Build 用 SA（terraform output build_service_account_email）でビルドする。
+# 既定の Compute SA は Compute Engine API を有効にしないと存在しないため使わない
+serviceAccount: projects/${PROJECT_ID}/serviceAccounts/${_BUILD_SA}
 options:
-  # 既定の Compute SA でビルドするため、ログの保存先を Cloud Logging に限定する
+  # ユーザー指定の SA でビルドする場合はログの保存先指定が必須。Cloud Logging に限定する
   logging: CLOUD_LOGGING_ONLY
 substitutions:
   # terraform output image_uri（例: asia-northeast1-docker.pkg.dev/PROJECT/poc-app/app）を渡す
   _IMAGE: ""
+  # terraform output build_service_account_email（例: poc-build@PROJECT.iam.gserviceaccount.com）を渡す
+  _BUILD_SA: ""
