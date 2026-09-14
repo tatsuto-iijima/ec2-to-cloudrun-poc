@@ -57,9 +57,9 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | `S3_BUCKET` | （必須） | アップロード先バケット |
 | `S3_KEY_PREFIX` | 空 | オブジェクトキーの接頭辞 |
 | `AWS_REGION` | `ap-northeast-1` | リージョン |
-| `S3_ENDPOINT` | 未設定 | S3 互換エンドポイント（MinIO / moto）。未設定なら本物の S3 |
+| `S3_ENDPOINT` | 未設定 | S3 互換エンドポイント（ローカルの moto）。未設定なら本物の S3 |
 | `S3_USE_PATH_STYLE` | `S3_ENDPOINT` があれば `true` | パススタイルのエンドポイントを使うか |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 未設定 | ローカル（MinIO）用。Cloud Run では使わず WIF（#6）に置き換える |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 未設定 | ローカル（moto）用。Cloud Run では使わず WIF（#6）に置き換える |
 
 ## 4. リポジトリ構成
 
@@ -124,24 +124,28 @@ docs/             検証レポート（検証項目ごとに 1 ファイル）+ 
 
 ## 6. ローカルでの起動・検証コマンド
 
-### Docker Compose（サンプルアプリ + MinIO。手元の Docker で実行）
+### Docker Compose（サンプルアプリ + moto の S3 モック。手元の Docker で実行）
 
 ```bash
-cp .env.example .env            # 初回のみ。MinIO 用の既定値が入っている
-docker compose up --build -d    # app(8080) / minio(9000, コンソール 9001) / minio-init / data-init
+cp .env.example .env            # 初回のみ。moto 用の既定値が入っている
+docker compose up --build -d    # app(8080) / s3mock(ホスト 9000 → コンテナ 5000) / s3mock-init / data-init
 docker compose logs -f app      # Apache のログ（update の所要時間もここに出る）
 
 # スモークテスト（healthz → GET / → POST /update → data/data.json の確認）
 BASE_URL=http://localhost:8080 DATA_DIR=./data scripts/smoke.sh
 
+# S3 モック上のオブジェクトを確認（aws CLI がある場合。認証情報は任意の値でよい）
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:9000 s3 cp s3://poc-bucket/data.json -
+
 # rename 方式で起動し直す
 WRITE_MODE=rename docker compose up -d app
 
-docker compose down -v          # 後片付け（MinIO のデータも消す）
+docker compose down             # 後片付け（moto のデータはメモリ上なので一緒に消える）
 ```
 
 - `./data` はコンテナの `/mnt/data` に bind mount される。`data-init` が `uid 33`（www-data）に chown するので、ホスト側で書き込む場合は権限に注意
 - 実 S3 を使う場合は `.env` で `S3_ENDPOINT=`（空）にし、`AWS_*` に実際の認証情報を入れる
+- S3 モックに moto（`motoserver/moto`）を使うのは、MinIO の公式イメージ（`minio/minio`, `minio/mc`）が Docker Hub から削除されていて pull できないため（2026-09 確認）
 
 ### PHP 内蔵サーバー + moto（Docker が使えない環境。Claude Code の作業環境はこちら）
 
