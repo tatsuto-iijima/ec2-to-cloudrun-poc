@@ -23,7 +23,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 
 | 項目 | 選定 |
 |---|---|
-| コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集） |
+| コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
 | 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1` |
 | 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す |
 | IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割 |
@@ -66,8 +66,9 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 ```
 CLAUDE.md         このファイル（AI 駆動開発の前提・ルール）
 README.md         リポジトリの概要
+.devcontainer/    Dev Container（docker-compose.yml の app サービスをベースに AWS CLI / Terraform を同梱）
 app/              サンプル PHP アプリ（public/, src/, composer.json）
-docker/           Dockerfile, Apache 設定
+docker/           Dockerfile（runtime / dev の 2 ステージ）, Apache 設定
 docker-compose.yml ローカル起動用
 terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry
 terraform/aws/    S3 / IAM ロール（Google OIDC 信頼）
@@ -123,6 +124,23 @@ docs/             検証レポート（検証項目ごとに 1 ファイル）+ 
 - 長期クレデンシャルをコンテナイメージや環境変数に置かない構成を優先する（S3 認証は WIF 主案）
 
 ## 6. ローカルでの起動・検証コマンド
+
+### Dev Container（推奨。手元の Docker + VS Code）
+
+`.devcontainer/` は `docker-compose.yml` の **`app` サービス自体を開発環境にする**構成。Apache が動いたまま `app/` の編集が即反映され、AWS CLI / Terraform / composer / git が入っている。
+
+```bash
+# VS Code で「Reopen in Container」。初回は .env が無ければ .env.example からコピーされ、
+# compose スタック（app / s3mock / s3mock-init / data-init）が起動し、コンテナ内で composer install が走る
+
+# コンテナ内のターミナルで（BASE_URL / DATA_DIR / S3_* / AWS_* は設定済み）
+scripts/smoke.sh                                                        # S3 の確認まで含めて ALL PASS になる
+aws --endpoint-url http://s3mock:5000 s3 cp s3://poc-bucket/data.json - # S3 モック上のオブジェクト
+curl -s http://localhost:8080/healthz
+```
+
+- `WRITE_MODE=rename` への切り替えなど compose の操作（再起動、`down`）はホスト側のターミナルで行う（コンテナ内に Docker CLI は無い）
+- ホスト側で `docker compose up` するときは `target: runtime`（実行イメージ）、Dev Container は `target: dev` で同じ Dockerfile をビルドする
 
 ### Docker Compose（サンプルアプリ + moto の S3 モック。手元の Docker で実行）
 
