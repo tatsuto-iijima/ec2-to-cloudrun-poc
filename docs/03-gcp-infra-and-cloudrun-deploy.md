@@ -72,9 +72,11 @@ terraform -chdir=terraform/gcp apply
 # terraform output から _IMAGE / _BUILD_SA を組み立てて gcloud builds submit する
 scripts/build-push.sh
 
-# 2 回目の apply（Cloud Run サービス）。image は tfvars に書いてもよい
-terraform -chdir=terraform/gcp apply -var image=$(terraform -chdir=terraform/gcp output -raw image_uri):$(git rev-parse --short HEAD)
+# 2 回目の apply（Cloud Run サービス）。image は build-push.sh が terraform/gcp/image.auto.tfvars に書き出している
+terraform -chdir=terraform/gcp apply
 ```
+
+`image.auto.tfvars` は `.gitignore` 済み（`*.tfvars`）。手で `-var image=...` を渡す場合は、`git rev-parse --short HEAD` ではなく**実際に push したタグ**（`build-push.sh` の出力、または `:latest`）を使う。
 
 ## 4. 動作確認手順
 
@@ -159,6 +161,16 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
 
 原因: `--substitutions` に `_BUILD_SA` を渡さずに実行したため、`serviceAccount: projects/PROJECT/serviceAccounts/` と SA 名が空になった。`cloudbuild.yaml` に `_BUILD_SA: ""` という空の既定値を置いていたので、指定漏れがエラーにならず空文字で通ってしまった。メッセージ中の「認証されているアカウント」は無関係。
 対処: `cloudbuild.yaml` から substitution の既定値を外し、未指定を submit 時のエラーにした。あわせて `scripts/build-push.sh` を追加し、`terraform output` から `_IMAGE` / `_BUILD_SA` を組み立てて実行するようにした（手で substitution を並べない）。
+
+### つまずいた点 4: 2 回目の apply で `Image '...:4bed53a' not found`（2026-09-14）
+
+原因: `git pull` で HEAD が進んだ後に `-var image=...:$(git rev-parse --short HEAD)` を実行したため、まだビルドしていないコミットの SHA をタグに指定した。イメージは `build-push.sh` 実行時点の SHA と `latest` で push されている。
+対処: `build-push.sh` が push したタグを `terraform/gcp/image.auto.tfvars` に書き出すようにし、2 回目以降の apply は `-var` なしで実行する。手で指定する場合は実際に push したタグか `:latest` を使う。
+
+### つまずいた点 5: Cloud Run サービスが Ready なのに run.app URL が 404（2026-09-14）
+
+`poc-app` が Ready・ingress `all`・トラフィック 100% で、DNS も正常（Cloud Run の正規 IP）なのに、認証あり／なしとも Google の汎用 404 ページが返り、コンテナにリクエストが届かなかった。同じリージョンに gcloud でデプロイした `hello` と、同じイメージ・同じ設定で gcloud からデプロイした `poc-app-test` は 403（到達）。`describe --format=export` の差分に経路へ影響する項目は無し。
+対処: run.app のホスト名がサービス名から決まるため、`service_name` 変数を追加してサービス名だけを変えて作り直せるようにした（`-var service_name=poc-web`）。結果は「6. 実機での確認結果」に記録する。
 
 ## 6. 実機での確認結果
 
