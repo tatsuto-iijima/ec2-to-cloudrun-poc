@@ -12,7 +12,8 @@
       "userGid": "1000"
     },
     "ghcr.io/devcontainers/features/aws-cli:1": {},
-    "ghcr.io/devcontainers/features/terraform:1": {}
+    "ghcr.io/devcontainers/features/terraform:1": {},
+    "ghcr.io/dhoeric/features/google-cloud-cli:1": {}
   },
   "remoteUser": "vscode",
   "postCreateCommand": "git config --global --add safe.directory /workspace && cd /var/www/html && composer install --no-interaction",
