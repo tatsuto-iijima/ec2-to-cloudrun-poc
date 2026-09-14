@@ -24,7 +24,8 @@ terraform/gcp/
   cloudrun.tf                 Cloud Run v2 サービス（下記）と invoker の IAM
   outputs.tf                  image_uri / bucket_name / service_account_email / build_service_account_email / service_account_unique_id / service_url / service_name
   terraform.tfvars.example    project_id / invoker_member / image の見本
-cloudbuild.yaml               docker build --target runtime -f docker/Dockerfile → ${_IMAGE}:${SHORT_SHA} と :latest を push。serviceAccount は Terraform で作った Cloud Build 用 SA（${_BUILD_SA}）
+cloudbuild.yaml               docker build --target runtime -f docker/Dockerfile → ${_IMAGE}:${SHORT_SHA} と :latest を push。serviceAccount は Terraform で作った Cloud Build 用 SA（${_BUILD_SA}）。substitution に既定値を置かず、未指定は submit 時にエラー
+scripts/build-push.sh         terraform output から _IMAGE / _BUILD_SA を組み立てて gcloud builds submit を実行する
 .gcloudignore                 Cloud Build に送らないファイル（vendor、data、docs、terraform など）
 docker/Dockerfile             dev ステージに gcloud CLI を追加（公式 apt リポジトリ、signed-by 方式。実行イメージ runtime には含めない）
 ```
@@ -68,8 +69,8 @@ terraform -chdir=terraform/gcp init
 terraform -chdir=terraform/gcp apply
 
 # イメージのビルドと push（Cloud Build。--target runtime。専用 SA でビルド）
-gcloud builds submit --config cloudbuild.yaml \
-  --substitutions _IMAGE=$(terraform -chdir=terraform/gcp output -raw image_uri),_BUILD_SA=$(terraform -chdir=terraform/gcp output -raw build_service_account_email),SHORT_SHA=$(git rev-parse --short HEAD) .
+# terraform output から _IMAGE / _BUILD_SA を組み立てて gcloud builds submit する
+scripts/build-push.sh
 
 # 2 回目の apply（Cloud Run サービス）。image は tfvars に書いてもよい
 terraform -chdir=terraform/gcp apply -var image=$(terraform -chdir=terraform/gcp output -raw image_uri):$(git rev-parse --short HEAD)
@@ -149,6 +150,15 @@ Error 400: Service account 912851559962-compute@developer.gserviceaccount.com do
 
 原因: Cloud Build の実行 SA として Compute Engine の既定 SA（`PROJECT_NUMBER-compute@developer.gserviceaccount.com`）を想定していたが、この SA は Compute Engine API を有効にしたときに作られるもので、新規プロジェクトには存在しない。組織によっては組織ポリシーで既定 SA が無効化されている。
 対処: Compute Engine API は有効化せず、Terraform で **Cloud Build 専用の SA**（`poc-build`）を作って必要最小限の権限（ソース用バケット `PROJECT_ID_cloudbuild` の `objectViewer`、Artifact Registry の `writer`、`logging.logWriter`）を付け、`cloudbuild.yaml` の `serviceAccount` で指定する。ユーザー指定の SA でビルドする場合は `options.logging` の指定が必須なので `CLOUD_LOGGING_ONLY` を維持する。`gcloud builds submit` を実行する人には、この SA に対する `roles/iam.serviceAccountUser`（プロジェクトのオーナーなら不要）が必要。
+
+### つまずいた点 3: `gcloud builds submit` で `NOT_FOUND: Unknown service account`（2026-09-14）
+
+```
+ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service account. This command is authenticated as ...
+```
+
+原因: `--substitutions` に `_BUILD_SA` を渡さずに実行したため、`serviceAccount: projects/PROJECT/serviceAccounts/` と SA 名が空になった。`cloudbuild.yaml` に `_BUILD_SA: ""` という空の既定値を置いていたので、指定漏れがエラーにならず空文字で通ってしまった。メッセージ中の「認証されているアカウント」は無関係。
+対処: `cloudbuild.yaml` から substitution の既定値を外し、未指定を submit 時のエラーにした。あわせて `scripts/build-push.sh` を追加し、`terraform output` から `_IMAGE` / `_BUILD_SA` を組み立てて実行するようにした（手で substitution を並べない）。
 
 ## 6. 実機での確認結果
 
