@@ -8,7 +8,9 @@
 - `terraform/gcp/` で API 有効化、Artifact Registry、作業領域バケット、Cloud Run 実行用サービスアカウント、Cloud Run v2 サービス（第2世代、Cloud Storage ボリュームを `/mnt/data` にマウント）を定義した
 - イメージのビルドは Cloud Build（`cloudbuild.yaml`、`--target runtime`）。手元に Docker は不要
 - Cloud Run は**非公開**（`roles/run.invoker` を自分のアカウントにだけ付与）。確認は ID トークン付き curl か `gcloud run services proxy`
-- この作業環境では `terraform fmt` / `init` / `validate` まで確認済み（google provider 8.2.0）。**`apply` → Cloud Build → Cloud Run の起動確認はユーザーの手元で実施**し、結果を「6. 実機での確認結果」に追記する
+- 手元（Dev Container）で `apply` → Cloud Build → `apply` → 動作確認まで実施し、**合否基準を満たした**（`/health` 200、`GET /` 200、`POST /update` で `/mnt/data/data.json` がバケットに書かれる。詳細は「6. 実機での確認結果」）
+- 死活確認のパスは `/healthz` ではなく **`/health`**。`*.run.app` では Google のフロントエンドが `/healthz` を横取りして 404 を返す（つまずいた点 5。Issue #5 の合否基準の `/healthz` はこの理由で `/health` に読み替える）
+- `terraform destroy` は #6 / #7 で同じ基盤を使うため未実施。#7 完了後に実施して結果を追記する（バケットは `force_destroy = true` なので中身ごと消える）
 
 ## 2. 構成
 
@@ -126,7 +128,7 @@ terraform -chdir=terraform/gcp destroy
 | `terraform init`（provider を `releases.hashicorp.com` から filesystem mirror で取得。registry.terraform.io は遮断） | OK（hashicorp/google v8.2.0） |
 | `terraform validate` | **Success! The configuration is valid.** |
 | `cloudbuild.yaml` の YAML、`.devcontainer/devcontainer.json` の JSON | OK |
-| `apply` / Cloud Build / Cloud Run 起動 | 未実施（GCP の認証情報が無い）→ 手元で実施 |
+| `apply` / Cloud Build / Cloud Run 起動 | この環境では不可（GCP の認証情報が無い）→ 手元で実施。結果は「6. 実機での確認結果」 |
 
 ### つまずいた点 1: gcloud CLI の devcontainer feature が Debian trixie で失敗する（2026-09-14）
 
@@ -192,7 +194,26 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
 
 ## 6. 実機での確認結果
 
-（未実施。手元で「3. デプロイ手順」「4. 動作確認手順」を実施して追記）
+2026-09-14、Dev Container（macOS / Apple Silicon）から実施。プロジェクトは組織配下の新規プロジェクト（無料トライアル）、リージョン asia-northeast1。
+
+| 確認 | 結果 | 備考 |
+|---|---|---|
+| `terraform apply`（1 回目） | OK | API 有効化、Artifact Registry、バケット、SA 2 つ（`poc-run` / `poc-build`）、権限 |
+| `scripts/build-push.sh`（Cloud Build） | OK | `--target runtime` で amd64 イメージをビルドし `:<sha>` と `:latest` で push。`image.auto.tfvars` を書き出す |
+| `terraform apply`（2 回目） | OK | Cloud Run サービス `poc-app`（gen2、`/mnt/data` にバケットをマウント、max 1）と invoker バインディング。startup probe（`/health`）は 2 回目で成功 |
+| `GET /health`（ID トークン付き） | **200** `{"status":"ok"}` | 合否基準 1 |
+| `GET /`（ID トークン付き） | **200** | 合否基準 2（`/mnt/data` の JSON が表示される） |
+| 認証なしのアクセス | 403 | 非公開設定が効いている（`allUsers` 無し） |
+| `POST /update` | 500（想定どおり） | S3 の認証が無いため `PutObject` で失敗。#6 で解消 |
+| バケットの中身 | `gs://<bucket>/data.json` あり | www-data（uid 33）が gcsfuse 上に**書けている**。JSON 書き込み → S3 PUT の順なので、500 でも JSON は更新済み |
+| 起動ログ | gcsfuse 3.11.3 が `File system has been successfully mounted.`、Apache 2.4.68 / PHP 8.3.33 起動、`STARTUP HTTP probe succeeded after 2 attempts ... path "/health"` | コールドスタートの内訳は #9 で計測 |
+| `terraform destroy` | 未実施 | #6 / #7 で同じ基盤を使う。#7 完了後に実施 |
+
+補足:
+
+- gcsfuse は `uid=33,gid=33` を指定しても起動ログ上は `uid:1033 gid:1033` で動く（Cloud Run 側で 1000 ずらして適用）。`file-mode 666 / dir-mode 777` のため www-data からの書き込みには支障が無く、実際に `data.json` が書けている。扱いは #7 で決める
+- Apache の `AH00558: Could not reliably determine the server's fully qualified domain name` は警告のみ。気になる場合は `ServerName localhost` を Apache 設定に足す（#10 の運用面で扱う）
+- 起動時のログにサービス単位の `run.googleapis.com/maxScale: '3'` アノテーション（サービスレベルの上限）が付く。テンプレートの `maxScale: '1'` が有効なので実害は無いが、#8 / #9 で挙動を確認する
 
 ## 7. #6 / #7 へ引き継ぐ事項
 
