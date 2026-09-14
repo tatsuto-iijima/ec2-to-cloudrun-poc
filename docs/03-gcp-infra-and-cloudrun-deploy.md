@@ -26,7 +26,7 @@ terraform/gcp/
   terraform.tfvars.example    project_id / invoker_member / image の見本
 cloudbuild.yaml               docker build --target runtime -f docker/Dockerfile → ${_IMAGE}:${SHORT_SHA} と :latest を push
 .gcloudignore                 Cloud Build に送らないファイル（vendor、data、docs、terraform など）
-.devcontainer/devcontainer.json  gcloud CLI feature を追加
+docker/Dockerfile             dev ステージに gcloud CLI を追加（公式 apt リポジトリ、signed-by 方式。実行イメージ runtime には含めない）
 ```
 
 ### Cloud Run サービスの設定（`cloudrun.tf`）
@@ -124,6 +124,21 @@ terraform -chdir=terraform/gcp destroy
 | `terraform validate` | **Success! The configuration is valid.** |
 | `cloudbuild.yaml` の YAML、`.devcontainer/devcontainer.json` の JSON | OK |
 | `apply` / Cloud Build / Cloud Run 起動 | 未実施（GCP の認証情報が無い）→ 手元で実施 |
+
+### つまずいた点 1: gcloud CLI の devcontainer feature が Debian trixie で失敗する（2026-09-14）
+
+当初はコミュニティ feature `ghcr.io/dhoeric/features/google-cloud-cli:1` で gcloud を入れる構成にしたが、ユーザーの手元（macOS / Apple Silicon、Docker Desktop）で Dev Container のビルドが失敗した。
+
+```
+./install.sh: line 72: apt-key: command not found
+ERROR: Feature "Google Cloud CLI" (ghcr.io/dhoeric/features/google-cloud-cli) failed to install!
+... did not complete successfully: exit code: 127
+```
+
+原因: `php:8.3-apache` の現行ベースは Debian trixie で、`apt-key` が削除されている。この feature の `install.sh` は `apt-key` で Google の鍵を登録するため必ず失敗する。
+対処: feature をやめ、`docker/Dockerfile` の `dev` ステージで公式手順（`/usr/share/keyrings/cloud.google.gpg` + `signed-by`）により `google-cloud-cli` を入れる。Google の apt リポジトリは amd64 / arm64 の両方を提供しているので Apple Silicon でも動く。実行イメージ `runtime` には含めない。
+
+補足: Apple Silicon の Dev Container は arm64 イメージをビルドするが、Cloud Run 用イメージは Cloud Build が linux/amd64 でビルドするので影響しない。Claude Code の作業環境からは `packages.cloud.google.com` に到達できないため（プロキシで遮断）、この Dockerfile の変更はユーザーの手元の「Rebuild Container」で確認する。
 
 ## 6. 実機での確認結果
 

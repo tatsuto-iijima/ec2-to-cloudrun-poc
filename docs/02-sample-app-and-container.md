@@ -152,7 +152,7 @@ S3 モック上のオブジェクト確認で `Command 'aws' not found`。ホス
 
 - `docker-compose.yml` の `app` サービス自体を Dev Container にする（`dockerComposeFile` + `service: app`）。開発環境 = 実行イメージ（`php:8.3-apache`）で、Apache が動いたまま `app/` の編集が即反映される
 - `docker/Dockerfile` に `dev` ステージ（`runtime` + git / unzip / composer）を追加。実行イメージ `runtime` には含めない。最終ステージが `dev` になるため、`docker-compose.yml` と #5 の Cloud Run 用ビルドでは `--target runtime` を明示する
-- AWS CLI / Terraform は Dev Container の features で載せる。作業ユーザーは `common-utils` feature で作る `vscode`（uid 1000）。Apache の worker は従来どおり `www-data`
+- AWS CLI / Terraform は Dev Container の features で載せる。gcloud CLI は Dockerfile の `dev` ステージで入れる（#5。コミュニティ feature が Debian trixie で失敗するため。`docs/03` 参照）。作業ユーザーは `common-utils` feature で作る `vscode`（uid 1000）。Apache の worker は従来どおり `www-data`
 - `app/` を `/var/www/html` に bind mount するとイメージ内の `vendor/` が隠れるため、`postCreateCommand` で `composer install`（ホストの `app/vendor` に生成。`.gitignore` 済み）
 - コンテナ内に Docker CLI は無いので、compose の操作（`WRITE_MODE` の切り替え等）はホスト側で行う
 
