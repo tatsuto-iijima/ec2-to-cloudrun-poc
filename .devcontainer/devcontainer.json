@@ -15,7 +15,7 @@
     "ghcr.io/devcontainers/features/terraform:1": {}
   },
   "remoteUser": "vscode",
-  "postCreateCommand": "git config --global --add safe.directory /workspace && cd /var/www/html && composer install --no-interaction",
+  "postCreateCommand": "sudo chown vscode:vscode /home/vscode/.aws /home/vscode/.config /home/vscode/.config/gcloud && git config --global --add safe.directory /workspace && cd /var/www/html && composer install --no-interaction",
   "customizations": {
     "vscode": {
       "extensions": [

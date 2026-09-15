@@ -71,6 +71,11 @@ $h = static fn (mixed $v): string => htmlspecialchars((string) $v, ENT_QUOTES, '
     <?php if ($config->s3Endpoint !== null): ?>
       / endpoint=<code><?= $h($config->s3Endpoint) ?></code>
     <?php endif; ?>
+    <?php if ($config->usesWebIdentity()): ?>
+      / 認証=<code>WIF <?= $h($config->awsRoleArn) ?></code>
+    <?php else: ?>
+      / 認証=<code>SDK 既定チェーン</code>
+    <?php endif; ?>
     / PHP <?= $h(PHP_VERSION) ?>
   </footer>
 </body>

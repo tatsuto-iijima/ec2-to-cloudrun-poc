@@ -1,0 +1,13 @@
+# cp terraform.tfvars.example terraform.tfvars して編集する。terraform.tfvars はコミットしない（.gitignore 済み）。
+
+# アップロード先の S3 バケット名（全世界で一意）
+bucket_name = "ec2-to-cloudrun-poc-xxxx"
+
+# Cloud Run 実行用 SA の一意 ID: terraform -chdir=terraform/gcp output -raw service_account_unique_id
+google_service_account_unique_id = "123456789012345678901"
+
+# 必要なら上書き（既定値は variables.tf）
+# region               = "ap-northeast-1"
+# key_prefix           = ""          # アプリの S3_KEY_PREFIX と合わせる
+# audience             = ""          # 空ならロールの ARN
+# max_session_duration = 3600

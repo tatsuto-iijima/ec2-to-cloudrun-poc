@@ -8,10 +8,16 @@ invoker_member = "user:you@example.com"
 # 2 回目の apply（Cloud Build でイメージを push した後）で指定する。空なら Cloud Run サービスを作らない
 # image = "asia-northeast1-docker.pkg.dev/your-gcp-project-id/poc-app/app:abc1234"
 
+# S3 のバケット名と IAM ロールの ARN は terraform/aws の output を aws.auto.tfvars に書き出して渡す（docs/04）:
+#   cat > terraform/gcp/aws.auto.tfvars <<EOF
+#   s3_bucket    = "$(terraform -chdir=terraform/aws output -raw bucket_name)"
+#   aws_role_arn = "$(terraform -chdir=terraform/aws output -raw role_arn)"
+#   EOF
+
 # 必要なら上書き（既定値は variables.tf）
 # service_name  = "poc-web"        # run.app のホスト名を変えたいとき（既定は poc-app）
 # region        = "asia-northeast1"
-# s3_bucket     = "poc-bucket"
+# aws_wif_audience = ""            # 空ならロールの ARN（terraform/aws の audience と揃える）
 # write_mode    = "lock"
 # concurrency   = 80
 # request_timeout = "300s"

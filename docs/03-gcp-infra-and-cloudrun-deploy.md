@@ -16,7 +16,7 @@
 
 ```
 terraform/gcp/
-  versions.tf                 Terraform >= 1.5、google provider ~> 8.0。state はローカル
+  versions.tf                 Terraform >= 1.5、google provider ~> 8.0。state は GCS の remote backend（prefix gcp。bucket は scripts/tf-init.sh が渡す）
   variables.tf                project_id（必須）/ region（asia-northeast1）/ name_prefix（poc）/ image（空なら Cloud Run を作らない）/
                               invoker_member / s3_bucket / aws_region / write_mode / max_instances（1）/ concurrency（80）/ request_timeout（300s）/ cpu / memory
   apis.tf                     run / artifactregistry / cloudbuild / iam / storage を有効化（destroy で無効化しない）
@@ -58,7 +58,7 @@ Cloud Run サービスはイメージが Artifact Registry に存在しないと
 ## 3. デプロイ手順（Dev Container 内で実施）
 
 ```bash
-# 認証（初回。Dev Container を rebuild すると消えるので再実行）
+# 認証（初回のみ。~/.config/gcloud は名前付きボリュームなので Dev Container を Rebuild しても残る。PR #17 で変更）
 gcloud auth login --no-launch-browser
 gcloud auth application-default login --no-launch-browser
 gcloud config set project <PROJECT_ID>
@@ -67,7 +67,7 @@ gcloud config set project <PROJECT_ID>
 cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # project_id と invoker_member を記入
 
 # 1 回目の apply（API / Artifact Registry / バケット / SA）
-terraform -chdir=terraform/gcp init
+scripts/tf-init.sh gcp                       # state バケット <PROJECT_ID>-tfstate を作り、gcs backend で init（ローカル state があれば移行）
 terraform -chdir=terraform/gcp apply
 
 # イメージのビルドと push（Cloud Build。--target runtime。専用 SA でビルド）
@@ -196,6 +196,29 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
 原因: 切り分けのために `terraform apply -var invoker_member=` を実行したが、`image` を `-var image=...:latest` で渡す運用のままで `image.auto.tfvars` が無かった（`build-push.sh` の修正前に push したイメージを使っていた）。`image` が空 → `count = 0` → サービスと invoker の 2 リソースが destroy された。
 対処: `image` は `image.auto.tfvars`（または `terraform.tfvars`）に書き、`-var image` は使わない（「3. デプロイ手順」参照）。`image` を空にしてサービスを消すのは意図した操作のときだけ。
 
+### つまずいた点 7: 別の環境で apply 済みの資源が 409 AlreadyExists になる（2026-09-15）
+
+Dev Container を Rebuild した後（正確には、資源を作ったのとは別の環境）で 1 回目の `terraform apply` を実行すると、SA 2 つ・バケット 2 つ・Artifact Registry がすべて `Error 409: ... already exists` で失敗した。
+
+- 原因: state が**ローカル**（`terraform/gcp/terraform.tfstate`。`.gitignore` 済み）なので、資源を作った環境の state が新しい環境には無く、Terraform は「何も無い」前提で作りに行く。GCP 側の資源は無事
+- 対処: 既存資源を新しい state に `terraform import` する。Cloud Run サービス（`poc-app`）も同じ状態なので、`build-push.sh` で `image.auto.tfvars` ができて `count = 1` になってから import し、そのあと 2 回目の apply をする
+
+```bash
+P=ec2-cloudrun-poc; R=asia-northeast1
+terraform -chdir=terraform/gcp import google_service_account.run   projects/$P/serviceAccounts/poc-run@$P.iam.gserviceaccount.com
+terraform -chdir=terraform/gcp import google_service_account.build projects/$P/serviceAccounts/poc-build@$P.iam.gserviceaccount.com
+terraform -chdir=terraform/gcp import google_storage_bucket.build_source ${P}_cloudbuild
+terraform -chdir=terraform/gcp import google_storage_bucket.data $P-poc-data
+terraform -chdir=terraform/gcp import google_artifact_registry_repository.app projects/$P/locations/$R/repositories/poc-app
+terraform -chdir=terraform/gcp apply          # IAM member（*_iam_member）は import 不要。付与済みなら差分は実質無い
+scripts/build-push.sh                         # image.auto.tfvars ができて count = 1 になる
+terraform -chdir=terraform/gcp import 'google_cloud_run_v2_service.app[0]' projects/$P/locations/$R/services/poc-app
+terraform -chdir=terraform/gcp apply
+```
+
+- 代替: 元の環境の `terraform/gcp/terraform.tfstate` をコピーして持ってくれば import は不要
+- 今後: → **PR #17 で GCS の remote backend に切り替えた**（`terraform/gcp` / `terraform/aws` とも。バケット `<PROJECT_ID>-tfstate`）。`terraform init` の代わりに `scripts/tf-init.sh gcp|aws` を使う。ローカルに state が残っている環境では `-migrate-state` で GCS に移行され、以後はどの環境からも同じ state を見る（`gcs` backend はロックを内蔵しているので同時 apply も防げる）
+
 ## 6. 実機での確認結果
 
 2026-09-14、Dev Container（macOS / Apple Silicon）から実施。プロジェクトは組織配下の新規プロジェクト（無料トライアル）、リージョン asia-northeast1。
@@ -221,6 +244,6 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
 
 ## 7. #6 / #7 へ引き継ぐ事項
 
-- **#6（S3 認証）**: `terraform output service_account_email` と `service_account_unique_id` を AWS 側の IAM ロールの信頼ポリシーに使う。`S3_BUCKET` は `var.s3_bucket` で差し替える
+- **#6（S3 認証）**: `terraform output service_account_email` と `service_account_unique_id` を AWS 側の IAM ロールの信頼ポリシーに使う。`S3_BUCKET` は `var.s3_bucket` で差し替える → `docs/04` で実施（`aws_role_arn` を追加）
 - **#7（gcsfuse 読み書き）**: `mount_options` は既定 + `uid=33,gid=33` で開始。鮮度の問題が出たら `metadata-cache-ttl-secs=0` を追加する。`WRITE_MODE` は `var.write_mode` で切り替えられる
 - **#8 / #9**: `concurrency` / `request_timeout` / `min_instance_count`（現状 0 固定）を変数化・調整する

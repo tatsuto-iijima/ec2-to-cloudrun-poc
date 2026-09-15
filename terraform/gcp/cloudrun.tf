@@ -43,7 +43,8 @@ resource "google_cloud_run_v2_service" "app" {
         cpu_idle = true
       }
 
-      # アプリの設定（app/src/Config.php が読む）。AWS の認証情報は渡さない（#6 で WIF）
+      # アプリの設定（app/src/Config.php が読む）。AWS のアクセスキーは渡さず、
+      # SA の ID トークンで AWS_ROLE_ARN のロールを引き受ける（鍵レス。docs/04）
       env {
         name  = "DATA_DIR"
         value = "/mnt/data"
@@ -59,6 +60,14 @@ resource "google_cloud_run_v2_service" "app" {
       env {
         name  = "AWS_REGION"
         value = var.aws_region
+      }
+      env {
+        name  = "AWS_ROLE_ARN"
+        value = var.aws_role_arn
+      }
+      env {
+        name  = "AWS_WIF_AUDIENCE"
+        value = var.aws_wif_audience
       }
 
       volume_mounts {
