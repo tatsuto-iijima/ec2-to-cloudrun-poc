@@ -221,6 +221,6 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
 
 ## 7. #6 / #7 へ引き継ぐ事項
 
-- **#6（S3 認証）**: `terraform output service_account_email` と `service_account_unique_id` を AWS 側の IAM ロールの信頼ポリシーに使う。`S3_BUCKET` は `var.s3_bucket` で差し替える
+- **#6（S3 認証）**: `terraform output service_account_email` と `service_account_unique_id` を AWS 側の IAM ロールの信頼ポリシーに使う。`S3_BUCKET` は `var.s3_bucket` で差し替える → `docs/04` で実施（`aws_role_arn` を追加）
 - **#7（gcsfuse 読み書き）**: `mount_options` は既定 + `uid=33,gid=33` で開始。鮮度の問題が出たら `metadata-cache-ttl-secs=0` を追加する。`WRITE_MODE` は `var.write_mode` で切り替えられる
 - **#8 / #9**: `concurrency` / `request_timeout` / `min_instance_count`（現状 0 固定）を変数化・調整する
