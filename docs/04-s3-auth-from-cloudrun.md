@@ -7,8 +7,8 @@ Issue #6。Cloud Run から AWS S3 へ、**長期クレデンシャルをイメ�
 
 - **主案（鍵レス）で実装した**。Cloud Run 実行用 SA の OIDC ID トークンをメタデータサーバーから取得し、AWS STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得て S3 に PUT する。AWS 側に置くのは S3 バケットと IAM ロール（信頼ポリシーで Google の SA に限定）だけで、アクセスキーは発行しない
 - この環境（GCP / AWS の認証なし）では、moto の S3 + STS と偽のメタデータサーバーで **`AWS_ACCESS_KEY_ID` を渡さずに `POST /update` → S3 PUT が成功**することを確認した（§6）。一時クレデンシャルのキャッシュと期限前の再取得も動いている
-- 実機（Cloud Run → 本物の STS / S3）での成否と、信頼ポリシーの条件キーの確定は §7 に記入する。**§7 が埋まるまで #6 の合否は暫定**
-- 代替案（Secret Manager 経由のアクセスキー）は、主案が実機で成立しなかった場合のみ実施する（§8 に比較だけ書いた）
+- **実機（Cloud Run → 本物の STS / S3）でも成立した**（§7、2026-09-15）。`POST /update` が 303 で S3 に `data.json` が書かれ、Cloud Run の環境変数にアクセスキーは無い。一時クレデンシャルを 900 秒にして 11 分後に POST しても成功（期限跨ぎ）。信頼ポリシーの条件キーは `accounts.google.com:sub` + `aud`（SA の一意 ID）+ `oaud`（audience = ロール ARN）の 3 つで成功し、`oaud` を別の値にすると拒否される（500）ことを確認した。**#6 の合否基準を満たした**
+- 代替案（Secret Manager 経由のアクセスキー）は主案が成立したので実施しない（§8 に比較だけ書いた）
 
 ## 2. 構成
 
@@ -170,17 +170,19 @@ update key=third mode=lock read=0.0ms write=0.2ms put=12.4ms target=s3://poc-buc
 
 この環境では確認できないもの: 本物の STS が Google の ID トークンを受理すること、信頼ポリシーの条件キーの組み合わせ、Cloud Run のメタデータサーバーが返すトークンのクレーム。いずれも §7 で確定する。
 
-## 7. 実機での確認結果（手元で実施して記入）
+## 7. 実機での確認結果（2026-09-15。ユーザーが手元で実施、PR #17 のコメントより）
 
 | 項目 | 結果 | メモ |
 |---|---|---|
-| `terraform -chdir=terraform/aws apply` | 未実施 | |
-| `scripts/build-push.sh` → `terraform -chdir=terraform/gcp apply` | 未実施 | |
-| `POST /update` → 303、S3 に `data.json` | 未実施 | |
-| 環境変数にアクセスキーが無い | 未実施 | |
-| ログ `wif: credentials refreshed` | 未実施 | |
-| 期限跨ぎ（`AWS_ROLE_DURATION_SECONDS=900`、11 分後の POST） | 未実施 | |
-| 条件キーの確定（`sub` + `aud` + `oaud`。`oaud` を変えると拒否） | 未実施 | |
+| `terraform -chdir=terraform/aws apply` | OK | バケット `ec2-to-cloudrun-poc`、ロール `poc-cloudrun-s3-upload` |
+| `scripts/build-push.sh` → `terraform -chdir=terraform/gcp apply` | OK | 別環境で作った資源は import してから（docs/03 つまずいた点 7） |
+| `POST /update` → 303、S3 に `data.json` | **OK** | `aws s3 cp s3://$BUCKET/data.json -` に `"wif": "ok-1"`、`counter: 2` |
+| 環境変数にアクセスキーが無い | **OK** | `WRITE_MODE` / `DATA_DIR` / `AWS_WIF_AUDIENCE`（値なし = アプリ側でロール ARN を補う）/ `S3_BUCKET` / `AWS_REGION` / `AWS_ROLE_ARN` のみ。`AWS_ACCESS_KEY_ID` は無い |
+| ログ `wif: credentials refreshed` | **OK** | `wif: credentials refreshed role=arn:aws:iam::<ACCOUNT>:role/poc-cloudrun-s3-upload expires=2026-09-15T09:23:45+00:00`（08:23:45 の 1 時間後 = 既定の `DurationSeconds` 3600） |
+| 期限跨ぎ（`AWS_ROLE_DURATION_SECONDS=900`、11 分後の POST） | **OK** | `gcloud run services update ... --update-env-vars AWS_ROLE_DURATION_SECONDS=900`（リビジョン `poc-app-00005-nkc`）→ POST 303 → `sleep 660` → POST 303。2 回目の `refreshed` ログは記録していないが、合否基準（2 回目の POST が成功）は満たしている |
+| 条件キーの確定（`sub` + `aud` + `oaud`。`oaud` を変えると拒否） | **OK** | 3 つの `StringEquals` で成功。`terraform -chdir=terraform/aws apply -var audience=https://example.invalid` にすると POST が **500**、戻すと **303**。`oaud`（トークンの `aud`）の条件が効いている |
+
+後片付け: 期限跨ぎの確認で `gcloud` から足した `AWS_ROLE_DURATION_SECONDS=900` は Terraform の定義に無いので、`terraform -chdir=terraform/gcp apply` で元に戻す（差分として消える）。
 
 ## 8. 代替案（Secret Manager 経由のアクセスキー）との比較
 
