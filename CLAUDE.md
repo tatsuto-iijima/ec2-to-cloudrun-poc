@@ -27,7 +27,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1` |
 | 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す |
 | IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割 |
-| S3 認証（主案） | Workload Identity Federation の逆方向。AWS IAM ロールの信頼ポリシーに `accounts.google.com` の Web Identity を設定し、条件キーで Cloud Run のサービスアカウントに限定。PHP 側はメタデータサーバーから ID トークンを取得し STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得る。**鍵レス** |
+| S3 認証（主案） | Workload Identity Federation の逆方向。AWS IAM ロールの信頼ポリシーに `accounts.google.com` の Web Identity を設定し、条件キー（`sub` / `aud` = SA の一意 ID、`oaud` = ロール ARN）で Cloud Run のサービスアカウントに限定。PHP 側（`app/src/GoogleWebIdentityCredentialProvider.php`）はメタデータサーバーから ID トークンを取得し STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得て `/tmp` にキャッシュする。**鍵レス**（#6 で実装。`docs/04`） |
 | S3 認証（代替案） | IAM ユーザーのアクセスキーを Secret Manager に格納して Cloud Run に注入。主案が成立しない場合のみ |
 | S3 クライアント | AWS SDK for PHP。認証は SDK のクレデンシャルプロバイダに委ね、WIF 実装に差し替えられる構造にする |
 
@@ -46,7 +46,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 - `GET /` : JSON の現在値を表示し、更新フォームを出す
 - `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303。各段階の所要時間（ms）を `error_log` に 1 行出す
 - `GET /health` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）。**`/healthz` は使わない**: Cloud Run の予約済み URL パス（`/eventlog`、`/_ah/` で始まるパス、**末尾が `z` のパス**）は Google のフロントエンドが横取りして 404 を返し、コンテナに届かない。経路を足すときもこの 3 種は避ける（Cloud Run の既知の問題「予約済みの URL パス」。docs/03 つまずいた点 5）
-- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/S3Uploader.php`（S3 PUT）、`app/templates/index.php`（画面）
+- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/S3Uploader.php`（S3 PUT）、`app/src/GoogleWebIdentityCredentialProvider.php`（WIF の認証）、`app/templates/index.php`（画面）
 
 | 環境変数 | 既定 | 説明 |
 |---|---|---|
@@ -59,21 +59,26 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | `AWS_REGION` | `ap-northeast-1` | リージョン |
 | `S3_ENDPOINT` | 未設定 | S3 互換エンドポイント（ローカルの moto）。未設定なら本物の S3 |
 | `S3_USE_PATH_STYLE` | `S3_ENDPOINT` があれば `true` | パススタイルのエンドポイントを使うか |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 未設定 | ローカル（moto）用。Cloud Run では使わず WIF（#6）に置き換える |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 未設定 | ローカル（moto）用。Cloud Run には渡さない（WIF を使う） |
+| `AWS_ROLE_ARN` | 未設定 | 設定されていれば WIF: Cloud Run の SA の ID トークンでこの IAM ロールを引き受ける。未設定なら SDK の既定チェーン（ローカル） |
+| `AWS_WIF_AUDIENCE` | `AWS_ROLE_ARN` と同じ | ID トークンの audience（AWS 側の `accounts.google.com:oaud`）。`terraform/aws` の `audience` と一致させる |
+| `AWS_ROLE_DURATION_SECONDS` | `3600` | 一時クレデンシャルの有効期間（900 以上、ロールの `max_session_duration` 以下）。期限 5 分前に取り直す |
+| `STS_ENDPOINT` | 未設定 | STS 互換エンドポイント（ローカルの moto）。未設定なら本物の STS（リージョナル） |
+| `GCE_METADATA_HOST` | `metadata.google.internal` | メタデータサーバーのホスト。ローカル検証で偽サーバーに向けるときだけ変える |
 
 ## 4. リポジトリ構成
 
 ```
 CLAUDE.md         このファイル（AI 駆動開発の前提・ルール）
 README.md         リポジトリの概要
-.devcontainer/    Dev Container（docker-compose.yml の app サービスをベース。AWS CLI / Terraform は features、gcloud は Dockerfile の dev ステージ）
+.devcontainer/    Dev Container（docker-compose.yml の app サービスをベース。AWS CLI / Terraform は features、gcloud は Dockerfile の dev ステージ。~/.aws を読み取り専用でマウント）
 app/              サンプル PHP アプリ（public/, src/, composer.json）
 docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / composer / gcloud CLI）, Apache 設定
 docker-compose.yml ローカル起動用
 cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registry へ push（--target runtime。scripts/build-push.sh から実行）
 .gcloudignore     Cloud Build に送らないファイル
 terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state はローカル）
-terraform/aws/    S3 / IAM ロール（Google OIDC 信頼）
+terraform/aws/    S3 バケット / IAM ロール（信頼ポリシーで Google の SA を指定。権限は s3:PutObject のみ。#6 で作成。state はローカル）
 scripts/          計測スクリプト（コールドスタート、処理時間、読み書き）
 docs/             検証レポート（検証項目ごとに 1 ファイル）+ 最終判定
 ```
@@ -206,8 +211,28 @@ terraform -chdir=terraform/gcp destroy                                          
 - Cloud Run は非公開（`invoker_member` にだけ `roles/run.invoker`）。`allUsers` には付与しない
 - Claude Code の作業環境では `apply` できない（GCP の認証情報が無い）。`terraform fmt` / `validate` までを行い、`apply` と動作確認はユーザーの手元で実施する。provider は `releases.hashicorp.com` から filesystem mirror で取得する（`registry.terraform.io` は遮断）
 
-### AWS（#6 で確定次第置き換える）
+### AWS（Dev Container 内で実施。詳細は `docs/04`）
 
 ```bash
-cd terraform/aws && terraform init && terraform plan && terraform apply
+# .env の moto 用アクセスキーが環境変数に入っている。環境変数のキーはプロファイルより優先されるので、実 AWS を触るシェルでは外す
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+export AWS_PROFILE=<profile>       # ホストの ~/.aws を読み取り専用でマウント済み。認証情報の設定（aws configure / SSO）はホスト側で行う
+aws sts get-caller-identity
+
+cp terraform/aws/terraform.tfvars.example terraform/aws/terraform.tfvars   # bucket_name, google_service_account_unique_id を記入
+terraform -chdir=terraform/aws init && terraform -chdir=terraform/aws apply
+
+# AWS 側の output を Cloud Run に渡す（*.tfvars は gitignore 済み）。その後 build-push.sh → terraform/gcp の apply
+cat > terraform/gcp/aws.auto.tfvars <<EOF
+s3_bucket    = "$(terraform -chdir=terraform/aws output -raw bucket_name)"
+aws_role_arn = "$(terraform -chdir=terraform/aws output -raw role_arn)"
+EOF
+
+# 確認: POST /update が 303 で S3 に data.json ができる
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $(gcloud auth print-identity-token)" -X POST -d 'key=wif&value=ok' $URL/update
+aws s3 cp s3://$(terraform -chdir=terraform/aws output -raw bucket_name)/data.json -
+terraform -chdir=terraform/aws destroy                                     # 後片付け（GCP 側と一緒に #7 完了後）
 ```
+
+- 信頼ポリシーの条件キー: `accounts.google.com:sub` と `:aud` は SA の一意 ID（トークンの `sub` / `azp`）、`:oaud` は audience（トークンの `aud`。既定はロール ARN）。対応表と理由は `docs/04` §2–3
+- ローカルで WIF の経路を通すには moto（S3 + STS）と偽メタデータサーバーを使う（`docs/04` §6）。通常のローカル起動は従来どおりアクセスキー（moto は値を検証しない）
