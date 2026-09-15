@@ -84,7 +84,18 @@ terraform -chdir=terraform/gcp apply           # FS_CHECK が空になり、FS_C
 gcloud run services logs read $(terraform -chdir=terraform/gcp output -raw service_name) --region asia-northeast1 --limit 200 | grep -iE 'gcsfuse|fs-check|update '
 ```
 
-`WRITE_MODE=rename` の挙動も見る場合は `write_mode = "rename"` を tfvars に書いて apply し、`rmw` と `scripts/smoke.sh` を再実行する（`fs-check` 自体は両方式を毎回測るので不要）。
+`WRITE_MODE` について:
+
+- `WRITE_MODE`（Terraform の `write_mode`）が効くのは、アプリ本体の `POST /update` が `data.json` を書き戻す方式（`JsonStore::write`）だけ。`/fs-check` はこの設定に依存しない。`rmw` は常に `LOCK_EX` 上書き、`rename` / `rename-loop` / `size` は常に一時ファイル + `rename` で、**両方式を毎回測る**（結果の `write_mode` はどちらの設定で測ったかの記録）。`WRITE_MODE` を変えて `scripts/fs-check.sh` を走らせ直す必要はない
+- 実際の `POST /update` を rename 方式で動かした所要時間も見たい場合だけ、次を行う（環境変数だけの変更なので再ビルドは不要）
+
+  ```bash
+  echo 'write_mode = "rename"' >> terraform/gcp/terraform.tfvars
+  terraform -chdir=terraform/gcp apply
+  scripts/smoke.sh                                                                       # POST /update が rename 方式で走る
+  gcloud run services logs read $(terraform -chdir=terraform/gcp output -raw service_name) --region asia-northeast1 --limit 20 | grep 'update key='   # mode=rename write=…ms
+  sed -i '/^write_mode/d' terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply   # lock に戻す
+  ```
 
 ## 4. 合否基準と分類表
 
