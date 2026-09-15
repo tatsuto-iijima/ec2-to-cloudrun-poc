@@ -58,7 +58,7 @@ Cloud Run サービスはイメージが Artifact Registry に存在しないと
 ## 3. デプロイ手順（Dev Container 内で実施）
 
 ```bash
-# 認証（初回。Dev Container を rebuild すると消えるので再実行）
+# 認証（初回のみ。~/.config/gcloud は名前付きボリュームなので Dev Container を Rebuild しても残る。PR #17 で変更）
 gcloud auth login --no-launch-browser
 gcloud auth application-default login --no-launch-browser
 gcloud config set project <PROJECT_ID>
