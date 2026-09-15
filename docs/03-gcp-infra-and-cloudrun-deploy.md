@@ -16,7 +16,7 @@
 
 ```
 terraform/gcp/
-  versions.tf                 Terraform >= 1.5、google provider ~> 8.0。state はローカル
+  versions.tf                 Terraform >= 1.5、google provider ~> 8.0。state は GCS の remote backend（prefix gcp。bucket は scripts/tf-init.sh が渡す）
   variables.tf                project_id（必須）/ region（asia-northeast1）/ name_prefix（poc）/ image（空なら Cloud Run を作らない）/
                               invoker_member / s3_bucket / aws_region / write_mode / max_instances（1）/ concurrency（80）/ request_timeout（300s）/ cpu / memory
   apis.tf                     run / artifactregistry / cloudbuild / iam / storage を有効化（destroy で無効化しない）
@@ -67,7 +67,7 @@ gcloud config set project <PROJECT_ID>
 cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # project_id と invoker_member を記入
 
 # 1 回目の apply（API / Artifact Registry / バケット / SA）
-terraform -chdir=terraform/gcp init
+scripts/tf-init.sh gcp                       # state バケット <PROJECT_ID>-tfstate を作り、gcs backend で init（ローカル state があれば移行）
 terraform -chdir=terraform/gcp apply
 
 # イメージのビルドと push（Cloud Build。--target runtime。専用 SA でビルド）
@@ -217,7 +217,7 @@ terraform -chdir=terraform/gcp apply
 ```
 
 - 代替: 元の環境の `terraform/gcp/terraform.tfstate` をコピーして持ってくれば import は不要
-- 今後: apply する環境は 1 つに固定する（`terraform/aws` も同じ）。両方の環境から触るなら GCS バケットの remote backend に切り替える
+- 今後: → **PR #17 で GCS の remote backend に切り替えた**（`terraform/gcp` / `terraform/aws` とも。バケット `<PROJECT_ID>-tfstate`）。`terraform init` の代わりに `scripts/tf-init.sh gcp|aws` を使う。ローカルに state が残っている環境では `-migrate-state` で GCS に移行され、以後はどの環境からも同じ state を見る（`gcs` backend はロックを内蔵しているので同時 apply も防げる）
 
 ## 6. 実機での確認結果
 

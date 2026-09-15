@@ -34,7 +34,7 @@ AWS
 
 ```
 terraform/aws/
-  versions.tf                 hashicorp/aws ~> 6.0、region = var.region（既定 ap-northeast-1）。state はローカル
+  versions.tf                 hashicorp/aws ~> 6.0、region = var.region（既定 ap-northeast-1）。state は GCS の remote backend（prefix aws。GCP 側と同じバケット）
   variables.tf                bucket_name / google_service_account_unique_id（必須）、key_prefix、audience、max_session_duration
   s3.tf                       aws_s3_bucket（force_destroy）+ aws_s3_bucket_public_access_block
   iam.tf                      信頼ポリシー（下表の 3 条件）、IAM ロール、s3:PutObject のみのインラインポリシー
@@ -72,6 +72,7 @@ AWS には Google（`accounts.google.com`）用の OIDC プロバイダが組み
 - **SDK 同梱の `AssumeRoleWithWebIdentityCredentialProvider` を使わない**: トークンを**ファイル**（`AWS_WEB_IDENTITY_TOKEN_FILE`）からしか読めない。EKS のようにトークンがファイルで投影される環境向けで、Cloud Run ではメタデータサーバーから取る必要がある。その実装（`InvalidIdentityToken` のリトライなど）を参考に自前で書いた
 - **`format=full`**: ID トークンに `email` クレームが入る。AWS の条件には使わないが、トラブル時にトークンの中身（`gcloud auth print-identity-token` や jwt.io で確認）が読みやすい
 - **`GCE_METADATA_HOST` / `STS_ENDPOINT`**: ローカル検証用の差し替え口。前者は Google のクライアントライブラリと同じ環境変数名
+- **state は GCP 側と同じ GCS バケット**（prefix `aws`）: 複数の環境から apply できるようにする（PR #17 のレビューで変更。docs/03 つまずいた点 7）。AWS 側に S3 backend を別に用意するより単純で、この PoC の AWS 資源は GCP の SA に紐づくものなので同じ場所でよい。`terraform/aws` の `init` にも gcloud の Application Default Credentials が要る
 - **AWS の認証は Dev Container の中で SSO**: `~/.aws` を名前付きボリューム（`aws-config`）にして、`aws configure sso` の設定と SSO のトークンキャッシュを Rebuild 後も残す。ホストの `~/.aws` はマウントしない（PR #17 のレビューで変更）。`--use-device-code` を付けるのは、AWS CLI v2 の既定（認可コード + PKCE）がブラウザから `127.0.0.1` のコールバックに戻る必要があり、コンテナ内では受け取れないため。デバイスコードなら URL とコードをホストのブラウザで開くだけでよい。空の名前付きボリュームは root 所有でマウントされるので、`postCreateCommand` で vscode に chown している。gcloud の認証情報（`~/.config/gcloud`）も同じ方法で永続化した
 - **`.env` の moto 用アクセスキー**: Dev Container には `.env` から `AWS_ACCESS_KEY_ID=test` が入る。**環境変数のアクセスキーはプロファイルより優先される**ので、実 AWS を触るシェルでは `unset` する（§4）。アプリ側は `AWS_ROLE_ARN` があれば WIF プロバイダを使い、環境変数のキーは見ない
 
@@ -88,7 +89,7 @@ aws sts get-caller-identity                        # 認証の確認
 cp terraform/aws/terraform.tfvars.example terraform/aws/terraform.tfvars
 #   bucket_name                      : 全世界で一意な名前
 #   google_service_account_unique_id : terraform -chdir=terraform/gcp output -raw service_account_unique_id
-terraform -chdir=terraform/aws init && terraform -chdir=terraform/aws apply
+scripts/tf-init.sh aws && terraform -chdir=terraform/aws apply   # state は GCS（<PROJECT_ID>-tfstate、prefix aws）。init には gcloud の ADC も必要
 
 # --- AWS 側の output を Cloud Run に渡す（*.tfvars は gitignore 済み） ---
 cat > terraform/gcp/aws.auto.tfvars <<EOF
