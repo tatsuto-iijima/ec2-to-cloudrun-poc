@@ -14,6 +14,7 @@ declare(strict_types=1);
  */
 
 use App\Config;
+use App\GoogleWebIdentityCredentialProvider;
 use App\JsonStore;
 use App\S3Uploader;
 
@@ -65,7 +66,9 @@ try {
         $store->write($data);
         $t2 = hrtime(true);
 
-        $uploader = new S3Uploader($config);
+        // Cloud Run では SA の ID トークンで AWS の IAM ロールを引き受ける（鍵レス）。ローカル（moto）では SDK の既定チェーン
+        $credentials = $config->usesWebIdentity() ? new GoogleWebIdentityCredentialProvider($config) : null;
+        $uploader = new S3Uploader($config, $credentials);
         $etag = $uploader->put(file_get_contents($config->dataPath()) ?: '');
         $t3 = hrtime(true);
 

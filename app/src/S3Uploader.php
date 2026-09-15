@@ -9,16 +9,16 @@ use Aws\S3\S3Client;
 /**
  * JSON を AWS S3 へアップロードする。
  *
- * 認証情報はこのクラスでは扱わず、AWS SDK の既定プロバイダチェーン
- * （環境変数 → 共有設定ファイル → ... ）に委ねる。Cloud Run では #6 で
- * Workload Identity Federation のプロバイダを $credentials として注入する。
+ * 認証情報はこのクラスでは扱わない。$credentials が null なら AWS SDK の既定プロバイダチェーン
+ * （環境変数 → 共有設定ファイル → ... ）に委ね、Cloud Run では GoogleWebIdentityCredentialProvider
+ * （SA の ID トークン → STS AssumeRoleWithWebIdentity。鍵レス）を注入する（app/public/index.php）。
  */
 final class S3Uploader
 {
     private readonly S3Client $client;
 
     /**
-     * @param callable|null $credentials AWS SDK のクレデンシャルプロバイダ。null なら既定チェーン
+     * @param callable|null $credentials AWS SDK のクレデンシャルプロバイダ（Credentials の Promise を返す callable）。null なら既定チェーン
      */
     public function __construct(
         private readonly Config $config,
