@@ -196,6 +196,29 @@ ERROR: (gcloud.builds.submit) NOT_FOUND: generic::not_found: Unknown service acc
 原因: 切り分けのために `terraform apply -var invoker_member=` を実行したが、`image` を `-var image=...:latest` で渡す運用のままで `image.auto.tfvars` が無かった（`build-push.sh` の修正前に push したイメージを使っていた）。`image` が空 → `count = 0` → サービスと invoker の 2 リソースが destroy された。
 対処: `image` は `image.auto.tfvars`（または `terraform.tfvars`）に書き、`-var image` は使わない（「3. デプロイ手順」参照）。`image` を空にしてサービスを消すのは意図した操作のときだけ。
 
+### つまずいた点 7: 別の環境で apply 済みの資源が 409 AlreadyExists になる（2026-09-15）
+
+Dev Container を Rebuild した後（正確には、資源を作ったのとは別の環境）で 1 回目の `terraform apply` を実行すると、SA 2 つ・バケット 2 つ・Artifact Registry がすべて `Error 409: ... already exists` で失敗した。
+
+- 原因: state が**ローカル**（`terraform/gcp/terraform.tfstate`。`.gitignore` 済み）なので、資源を作った環境の state が新しい環境には無く、Terraform は「何も無い」前提で作りに行く。GCP 側の資源は無事
+- 対処: 既存資源を新しい state に `terraform import` する。Cloud Run サービス（`poc-app`）も同じ状態なので、`build-push.sh` で `image.auto.tfvars` ができて `count = 1` になってから import し、そのあと 2 回目の apply をする
+
+```bash
+P=ec2-cloudrun-poc; R=asia-northeast1
+terraform -chdir=terraform/gcp import google_service_account.run   projects/$P/serviceAccounts/poc-run@$P.iam.gserviceaccount.com
+terraform -chdir=terraform/gcp import google_service_account.build projects/$P/serviceAccounts/poc-build@$P.iam.gserviceaccount.com
+terraform -chdir=terraform/gcp import google_storage_bucket.build_source ${P}_cloudbuild
+terraform -chdir=terraform/gcp import google_storage_bucket.data $P-poc-data
+terraform -chdir=terraform/gcp import google_artifact_registry_repository.app projects/$P/locations/$R/repositories/poc-app
+terraform -chdir=terraform/gcp apply          # IAM member（*_iam_member）は import 不要。付与済みなら差分は実質無い
+scripts/build-push.sh                         # image.auto.tfvars ができて count = 1 になる
+terraform -chdir=terraform/gcp import 'google_cloud_run_v2_service.app[0]' projects/$P/locations/$R/services/poc-app
+terraform -chdir=terraform/gcp apply
+```
+
+- 代替: 元の環境の `terraform/gcp/terraform.tfstate` をコピーして持ってくれば import は不要
+- 今後: apply する環境は 1 つに固定する（`terraform/aws` も同じ）。両方の環境から触るなら GCS バケットの remote backend に切り替える
+
 ## 6. 実機での確認結果
 
 2026-09-14、Dev Container（macOS / Apple Silicon）から実施。プロジェクトは組織配下の新規プロジェクト（無料トライアル）、リージョン asia-northeast1。
