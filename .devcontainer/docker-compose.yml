@@ -17,9 +17,12 @@ services:
       # Dev Container 側で持ち、Rebuild しても残るように名前付きボリュームにする（消えるのは docker compose down -v のときだけ）。
       # 空のボリュームは root 所有でマウントされるので、devcontainer.json の postCreateCommand で vscode に chown する
       - aws-config:/home/vscode/.aws
+      # gcloud の認証情報（gcloud auth login / application-default login の結果と config）。同じく名前付きボリュームで永続化
+      - gcloud-config:/home/vscode/.config/gcloud
     environment:
       # scripts/smoke.sh 用（同一コンテナ内なので localhost）。DATA_DIR / S3_* / AWS_* は基の compose と .env から入る
       BASE_URL: http://localhost:8080
 
 volumes:
   aws-config:
+  gcloud-config:
