@@ -26,7 +26,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer / gcloud CLI 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
 | 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1` |
 | 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す |
-| IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割 |
+| IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割。state は GCS の remote backend（バケット `<PROJECT_ID>-tfstate` を prefix `gcp` / `aws` で共有。ロック内蔵）。init は `scripts/tf-init.sh gcp\|aws` |
 | S3 認証（主案） | Workload Identity Federation の逆方向。AWS IAM ロールの信頼ポリシーに `accounts.google.com` の Web Identity を設定し、条件キー（`sub` / `aud` = SA の一意 ID、`oaud` = ロール ARN）で Cloud Run のサービスアカウントに限定。PHP 側（`app/src/GoogleWebIdentityCredentialProvider.php`）はメタデータサーバーから ID トークンを取得し STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得て `/tmp` にキャッシュする。**鍵レス**（#6 で実装。`docs/04`） |
 | S3 認証（代替案） | IAM ユーザーのアクセスキーを Secret Manager に格納して Cloud Run に注入。主案が成立しない場合のみ |
 | S3 クライアント | AWS SDK for PHP。認証は SDK のクレデンシャルプロバイダに委ね、WIF 実装に差し替えられる構造にする |
@@ -77,9 +77,9 @@ docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / 
 docker-compose.yml ローカル起動用
 cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registry へ push（--target runtime。scripts/build-push.sh から実行）
 .gcloudignore     Cloud Build に送らないファイル
-terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state はローカル）
-terraform/aws/    S3 バケット / IAM ロール（信頼ポリシーで Google の SA を指定。権限は s3:PutObject のみ。#6 で作成。state はローカル）
-scripts/          計測スクリプト（コールドスタート、処理時間、読み書き）
+terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state は GCS）
+terraform/aws/    S3 バケット / IAM ロール（信頼ポリシーで Google の SA を指定。権限は s3:PutObject のみ。#6 で作成。state は GCS）
+scripts/          tf-init.sh（state バケットの作成と terraform init）、build-push.sh（Cloud Build）、smoke.sh、計測スクリプト
 docs/             検証レポート（検証項目ごとに 1 ファイル）+ 最終判定
 ```
 
@@ -129,7 +129,7 @@ docs/             検証レポート（検証項目ごとに 1 ファイル）+ 
 - クラウドリソースは Terraform で作成し、PoC 終了時に `terraform destroy` で削除する（コスト抑制）
 - 認証情報（AWS アクセスキー、サービスアカウント鍵、`terraform.tfvars` の秘匿値、`.env`）はリポジトリにコミットしない。`.gitignore` で除外する
 - 長期クレデンシャルをコンテナイメージや環境変数に置かない構成を優先する（S3 認証は WIF 主案）
-- Terraform の state はローカル（`terraform.tfstate`。gitignore 済み）なので、`apply` は 1 つの環境から行う。環境を変えるときは `terraform.tfstate` を持っていくか、既存資源を `terraform import` する（`docs/03` つまずいた点 7）
+- Terraform の state は GCS の remote backend に置く（バケット `<PROJECT_ID>-tfstate`。`terraform/gcp` は prefix `gcp`、`terraform/aws` は `aws`）。`terraform init` の代わりに **`scripts/tf-init.sh gcp|aws`** を使う（バケットが無ければ作り、ローカルに state があれば移行する）。バケットは Terraform の管理外なので `destroy` では消えない。PoC 終了時に `gcloud storage rm -r gs://<PROJECT_ID>-tfstate` で消す。ローカル state だった頃に別環境で 409 になった経緯は `docs/03` つまずいた点 7
 
 ## 6. ローカルでの起動・検証コマンド
 
@@ -199,7 +199,7 @@ gcloud auth login --no-launch-browser && gcloud auth application-default login -
 gcloud config set project <PROJECT_ID>
 cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # project_id, invoker_member を記入
 
-terraform -chdir=terraform/gcp init && terraform -chdir=terraform/gcp apply   # 1 回目: API / AR / バケット / SA
+scripts/tf-init.sh gcp && terraform -chdir=terraform/gcp apply                 # 1 回目: API / AR / バケット / SA（tf-init.sh は state バケットを作って init）
 scripts/build-push.sh                                                          # Cloud Build で --target runtime をビルドして push。push したタグを terraform/gcp/image.auto.tfvars に書き出す
 terraform -chdir=terraform/gcp apply                                           # 2 回目: Cloud Run（image は image.auto.tfvars から。-var image は使わない: 空だとサービスが消える）
 
@@ -223,7 +223,7 @@ export AWS_PROFILE=<profile>
 aws sts get-caller-identity
 
 cp terraform/aws/terraform.tfvars.example terraform/aws/terraform.tfvars   # bucket_name, google_service_account_unique_id を記入
-terraform -chdir=terraform/aws init && terraform -chdir=terraform/aws apply
+scripts/tf-init.sh aws && terraform -chdir=terraform/aws apply                 # state は GCS。init には gcloud の ADC も必要
 
 # AWS 側の output を Cloud Run に渡す（*.tfvars は gitignore 済み）。その後 build-push.sh → terraform/gcp の apply
 cat > terraform/gcp/aws.auto.tfvars <<EOF
