@@ -36,9 +36,21 @@ variable "invoker_member" {
 }
 
 variable "s3_bucket" {
-  description = "アップロード先の S3 バケット名（#6 で実バケットに置き換える）"
+  description = "アップロード先の S3 バケット名（terraform -chdir=terraform/aws output -raw bucket_name。aws.auto.tfvars に書き出す）"
   type        = string
   default     = "poc-bucket"
+}
+
+variable "aws_role_arn" {
+  description = "Cloud Run の SA が引き受ける AWS IAM ロールの ARN（terraform -chdir=terraform/aws output -raw role_arn）。空なら WIF を使わず、S3 PUT は失敗する"
+  type        = string
+  default     = ""
+}
+
+variable "aws_wif_audience" {
+  description = "ID トークンの audience（AWS 側の accounts.google.com:oaud）。空ならロールの ARN。terraform/aws の audience と一致させる"
+  type        = string
+  default     = ""
 }
 
 variable "aws_region" {
