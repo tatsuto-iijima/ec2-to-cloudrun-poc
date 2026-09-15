@@ -7,6 +7,9 @@
 #   5. S3 オブジェクト（aws CLI があり S3_BUCKET 指定時）に同じ内容が入っている
 #
 # 使い方: BASE_URL=http://localhost:8080 DATA_DIR=./data scripts/smoke.sh
+#   Cloud Run（IAM 認証）に向ける場合: BASE_URL が *.run.app なら gcloud auth print-identity-token で ID トークンを付ける
+#   （TOKEN 環境変数で明示も可）。DATA_DIR は空にし、S3 の確認は実バケットと AWS_PROFILE で行う:
+#   BASE_URL=$URL DATA_DIR= S3_ENDPOINT= S3_BUCKET=$(terraform -chdir=terraform/aws output -raw bucket_name) scripts/smoke.sh
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:8080}"
@@ -15,6 +18,13 @@ DATA_FILE="${DATA_FILE:-data.json}"
 S3_BUCKET="${S3_BUCKET:-}"
 S3_KEY_PREFIX="${S3_KEY_PREFIX:-}"
 S3_ENDPOINT="${S3_ENDPOINT:-}"
+TOKEN="${TOKEN:-}"
+
+if [[ -z "$TOKEN" && "$BASE_URL" == *.run.app* ]]; then
+  TOKEN=$(gcloud auth print-identity-token)
+fi
+auth=()
+[[ -n "$TOKEN" ]] && auth=(-H "Authorization: Bearer $TOKEN")
 
 key="smoke"
 value="ok-$(date +%s)"
@@ -24,18 +34,18 @@ pass() { echo "PASS: $*"; }
 ng() { echo "FAIL: $*"; fail=1; }
 
 # 1. health
-body=$(curl -sS -w '\n%{http_code}' "$BASE_URL/health")
+body=$(curl -sS "${auth[@]}" -w '\n%{http_code}' "$BASE_URL/health")
 code=${body##*$'\n'}
 if [[ "$code" == "200" && "$body" == *'"status":"ok"'* ]]; then pass "GET /health -> 200"; else ng "GET /health -> $code"; fi
 
 # 2. index
-code=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE_URL/")
+code=$(curl -sS "${auth[@]}" -o /dev/null -w '%{http_code}' "$BASE_URL/")
 if [[ "$code" == "200" ]]; then pass "GET / -> 200"; else ng "GET / -> $code"; fi
 
 # 3. update（303 → / に更新後の値が出る）
-code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST --data-urlencode "key=$key" --data-urlencode "value=$value" "$BASE_URL/update")
+code=$(curl -sS "${auth[@]}" -o /dev/null -w '%{http_code}' -X POST --data-urlencode "key=$key" --data-urlencode "value=$value" "$BASE_URL/update")
 if [[ "$code" == "303" ]]; then pass "POST /update -> 303"; else ng "POST /update -> $code"; fi
-if curl -sS "$BASE_URL/" | grep -q "$value"; then pass "GET / に更新後の値が表示される"; else ng "GET / に更新後の値が無い"; fi
+if curl -sS "${auth[@]}" "$BASE_URL/" | grep -q "$value"; then pass "GET / に更新後の値が表示される"; else ng "GET / に更新後の値が無い"; fi
 
 # 4. DATA_DIR のファイル
 if [[ -n "$DATA_DIR" ]]; then
