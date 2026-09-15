@@ -46,8 +46,8 @@ app/src/GoogleWebIdentityCredentialProvider.php
                               メタデータサーバー → STS → Credentials。ファイルキャッシュ付き。S3Uploader の ?callable $credentials に注入
 app/src/Config.php            AWS_ROLE_ARN / AWS_WIF_AUDIENCE / AWS_ROLE_DURATION_SECONDS / STS_ENDPOINT / GCE_METADATA_HOST
 app/public/index.php          AWS_ROLE_ARN があればプロバイダを注入、無ければ SDK 既定チェーン（ローカルの moto）
-.devcontainer/docker-compose.yml
-                              ~/.aws を読み取り専用でマウント（terraform/aws と aws CLI 用）
+.devcontainer/docker-compose.yml, devcontainer.json
+                              ~/.aws を名前付きボリュームにして SSO の設定とトークンキャッシュを Dev Container 側で永続化（初回に vscode へ chown）
 ```
 
 ### 信頼ポリシーの条件キーと Google ID トークンのクレームの対応
@@ -72,6 +72,7 @@ AWS には Google（`accounts.google.com`）用の OIDC プロバイダが組み
 - **SDK 同梱の `AssumeRoleWithWebIdentityCredentialProvider` を使わない**: トークンを**ファイル**（`AWS_WEB_IDENTITY_TOKEN_FILE`）からしか読めない。EKS のようにトークンがファイルで投影される環境向けで、Cloud Run ではメタデータサーバーから取る必要がある。その実装（`InvalidIdentityToken` のリトライなど）を参考に自前で書いた
 - **`format=full`**: ID トークンに `email` クレームが入る。AWS の条件には使わないが、トラブル時にトークンの中身（`gcloud auth print-identity-token` や jwt.io で確認）が読みやすい
 - **`GCE_METADATA_HOST` / `STS_ENDPOINT`**: ローカル検証用の差し替え口。前者は Google のクライアントライブラリと同じ環境変数名
+- **AWS の認証は Dev Container の中で SSO**: `~/.aws` を名前付きボリューム（`aws-config`）にして、`aws configure sso` の設定と SSO のトークンキャッシュを Rebuild 後も残す。ホストの `~/.aws` はマウントしない（PR #17 のレビューで変更）。`--use-device-code` を付けるのは、AWS CLI v2 の既定（認可コード + PKCE）がブラウザから `127.0.0.1` のコールバックに戻る必要があり、コンテナ内では受け取れないため。デバイスコードなら URL とコードをホストのブラウザで開くだけでよい。空の名前付きボリュームは root 所有でマウントされるので、`postCreateCommand` で vscode に chown している
 - **`.env` の moto 用アクセスキー**: Dev Container には `.env` から `AWS_ACCESS_KEY_ID=test` が入る。**環境変数のアクセスキーはプロファイルより優先される**ので、実 AWS を触るシェルでは `unset` する（§4）。アプリ側は `AWS_ROLE_ARN` があれば WIF プロバイダを使い、環境変数のキーは見ない
 
 ## 4. デプロイ手順（Dev Container 内で実施）
@@ -79,7 +80,9 @@ AWS には Google（`accounts.google.com`）用の OIDC プロバイダが組み
 ```bash
 # --- AWS 側 ---
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY      # .env の moto 用の値を外す（プロファイルより優先されてしまう）
-export AWS_PROFILE=<profile>                       # ホストの ~/.aws を読み取り専用でマウント済み（認証情報の設定はホスト側で）
+aws configure sso --use-device-code                # 初回のみ。SSO の start URL / region とプロファイル名を対話で入力。~/.aws は名前付きボリュームなので Rebuild 後も残る
+aws sso login --use-device-code --profile <profile>   # トークン（既定 8 時間）が切れたとき。表示された URL とコードをホストのブラウザで開く
+export AWS_PROFILE=<profile>
 aws sts get-caller-identity                        # 認証の確認
 
 cp terraform/aws/terraform.tfvars.example terraform/aws/terraform.tfvars
