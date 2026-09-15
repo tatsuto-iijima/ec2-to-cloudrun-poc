@@ -238,7 +238,7 @@ terraform -chdir=terraform/gcp apply
 
 補足:
 
-- gcsfuse は `uid=33,gid=33` を指定しても起動ログ上は `uid:1033 gid:1033` で動く（Cloud Run 側で 1000 ずらして適用）。`file-mode 666 / dir-mode 777` のため www-data からの書き込みには支障が無く、実際に `data.json` が書けている。扱いは #7 で決める
+- gcsfuse は `uid=33,gid=33` を指定しても起動ログ上は `uid:1033 gid:1033` で動く（Cloud Run 側で 1000 ずらして適用）。`file-mode 666 / dir-mode 777` のため www-data からの書き込みには支障が無く、実際に `data.json` が書けている。#7 で確認: PHP は uid/gid 33 で動き、`allow_other` で書けているので現状維持（`docs/05` §6）
 - Apache の `AH00558: Could not reliably determine the server's fully qualified domain name` は警告のみ。気になる場合は `ServerName localhost` を Apache 設定に足す（#10 の運用面で扱う）
 - 起動時のログにサービス単位の `run.googleapis.com/maxScale: '3'` アノテーション（サービスレベルの上限）が付く。テンプレートの `maxScale: '1'` が有効なので実害は無いが、#8 / #9 で挙動を確認する
 

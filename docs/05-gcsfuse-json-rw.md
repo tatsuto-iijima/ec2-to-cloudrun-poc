@@ -5,10 +5,11 @@
 
 ## 1. 結論
 
-（実機の結果を反映してから確定する。§6 に記入）
-
-- 検証の仕組み（診断経路 `POST /fs-check` と `scripts/fs-check.sh`）はこの環境（ローカル FS）で全 case が通ることを確認した（§5）
-- 実機（Cloud Run + Cloud Storage ボリューム）での (a)〜(f) と追加項目の結果、および「そのまま動く / 実装修正で回避可能 / 回避不可」の分類は §4 の表に記入する
+- **(a)〜(f) と追加項目はすべて「そのまま動く」。実装修正が必要な項目は無い。** Issue #1 の検証項目「gcsfuse マウント領域で、アプリが期待する JSON の読み書きが成立するか」は**成立**（実機 2026-09-15、§6）
+- read-modify-write、一時ファイル + `rename`（途中の内容は見えない）、`LOCK_EX` / `flock`（同一インスタンス内で直列化される）、`FILE_APPEND`、新インスタンスでの鮮度、100KB〜50MB の読み書きのすべてが成功した
+- コストはローカルディスク比で **書き込み 1 回 0.1〜0.2 秒**（オブジェクト全体の再アップロード。1MB 未満ならサイズによらずほぼ一定）、**読み込み 40ms（同一インスタンスで読み直すと 1ms）**。現行アプリの「少数ファイル・各 1MB 未満・1 操作 1 更新」なら実用上の問題にならない
+- 注意点は 2 つ。並行して読まれている最中の `rename` は稀に 4〜5 秒かかる（30 回中の最大値。平均 0.3 秒）。アプリ以外（`gcloud storage cp` 等）で書き換えたオブジェクトは **最大 60 秒間、古い内容が見える**（stat cache TTL）。どちらも「一人で操作・アプリだけが書く」前提では影響しない
+- `mount_options` は既定 + `uid=33,gid=33` のまま変更しない。`chmod` は成功を返すが反映されない（既知）。パーミッションに依存しない現行実装のままでよい
 
 ## 2. 検証方法
 
@@ -103,15 +104,15 @@ gcloud run services logs read $(terraform -chdir=terraform/gcp output -raw servi
 
 | 項目 | 確認内容 | 机上評価の見込み（docs/01） | 実機の結果 | 分類 |
 |---|---|---|---|---|
-| (a) | read-modify-write が成立する | 成立。既存ファイルの変更は全体ダウンロード + 全体再アップロード | （記入） | （記入） |
-| (b) | tmp + `rename` の動作と所要時間。途中の内容が見えないこと | GCS の rename API。同一ディレクトリなら 1 オブジェクト操作 | （記入） | （記入） |
-| (c) | `LOCK_EX` / `flock` の戻り値。同一インスタンス内で直列化されるか | ロックはカーネル内ローカルで成功。GCS には伝播しない | （記入） | （記入） |
-| (d) | `FILE_APPEND` の動作と所要時間 | 1MB 未満は全体再アップロード | （記入） | （記入） |
-| (e) | 新インスタンスで読んだ JSON が最新 | 新しいマウントでキャッシュは空。最新世代を読む | （記入） | （記入） |
-| (f) | サイズ別（100KB / 1MB / 10MB）の読み書きレイテンシ | 未知。1MB が主ケース | （記入） | （記入） |
-| 追加 | `chmod` の戻り値と `is_writable` | `chmod` は反映されない（エラーにもならない） | （記入） | （記入） |
-| 追加 | `glob` / `scandir` の所要時間 | LIST 1 回。少数ファイルなら問題なし | （記入） | （記入） |
-| 追加 | アプリ以外からの書き換えの見え方 | stat cache TTL 60 秒の間は古い内容が見える可能性 | （記入） | （運用上の注意） |
+| (a) | read-modify-write が成立する | 成立。既存ファイルの変更は全体ダウンロード + 全体再アップロード | 6 回すべて一致。read 初回 33〜44ms → 以後 0.5〜1.4ms、write（`LOCK_EX` 上書き）78〜194ms、reread 36〜52ms | **そのまま動く** |
+| (b) | tmp + `rename` の動作と所要時間。途中の内容が見えないこと | GCS の rename API。同一ディレクトリなら 1 オブジェクト操作 | 1MB: write 138ms / rename 40〜114ms / read 77〜112ms、tmp 残らず。並行読み取り 5,075 回で途中の内容 0・欠落 0・JSON 不正 0。並行中の rename は平均 0.27〜0.33 秒、最大 4.3〜4.9 秒 | **そのまま動く**（並行読み取り中の rename の裾が重い点は記録） |
+| (c) | `LOCK_EX` / `flock` の戻り値。同一インスタンス内で直列化されるか | ロックはカーネル内ローカルで成功。GCS には伝播しない | `file_put_contents(LOCK_EX)` 成功、`flock(LOCK_EX)` / `LOCK_NB` / `LOCK_UN` / 別ハンドルの `LOCK_SH` すべて true。後着の待ち **2.5 秒**（先着が 3 秒保持、0.5 秒後に開始）→ 直列化される | **そのまま動く**（#8 の二重送信対策に使える） |
+| (d) | `FILE_APPEND` の動作と所要時間 | 1MB 未満は全体再アップロード | 1KB 追記 73〜224ms、1MB 追記 180〜205ms。1MB 超のファイルへの 1KB 追記も 180〜220ms（全体再アップロード） | **そのまま動く**（現行は未使用） |
+| (e) | 新インスタンスで読んだ JSON が最新 | 新しいマウントでキャッシュは空。最新世代を読む | 旧インスタンスで書いた `counter=7` / `fs-check=1789471033` を、新リビジョン・新インスタンスで読んで一致（`instance_changed: true, fresh: true`） | **そのまま動く** |
+| (f) | サイズ別（100KB / 1MB / 10MB）の読み書きレイテンシ | 未知。1MB が主ケース | 新規 / 上書き / tmp 書き / rename / 読み（ms）: 100KB 106 / 157 / 111 / 49 / 37、**1MB 104 / 166 / 124 / 47 / 38**、10MB 235 / 309 / 205 / 39 / 112、50MB 630 / 1045 / 600 / 60 / 376 | **そのまま動く**（1MB 未満は書き 0.1〜0.2 秒・読み 0.04 秒。50MB でも 1 秒） |
+| 追加 | `chmod` の戻り値と `is_writable` | `chmod` は反映されない（エラーにもならない） | `chmod(0600)` は true だが `fileperms` は **666 のまま**。`is_writable` true。`touch` は mtime に反映される | **そのまま動く**（パーミッション判定に依存しない実装のまま） |
+| 追加 | `glob` / `scandir` の所要時間 | LIST 1 回。少数ファイルなら問題なし | 10〜11 ファイルで `glob` 24〜26ms、`scandir` 28〜33ms。gcsfuse の readdir は `.` `..` を返さない | **そのまま動く** |
+| 追加 | アプリ以外からの書き換えの見え方 | stat cache TTL 60 秒の間は古い内容が見える可能性 | `gcloud storage cp` 直後の `GET /` は**古い内容**、65 秒後に新しい内容 | **運用上の注意**（アプリ以外で書き換えたら 60 秒待つか新リビジョンにする。アプリだけが書く前提では影響なし） |
 
 ## 5. この環境での検証結果（ローカル FS。ハーネスの確認と比較基準）
 
@@ -146,22 +147,37 @@ gcloud run services logs read $(terraform -chdir=terraform/gcp output -raw servi
 
 ## 6. 実機での確認結果
 
-（ユーザーの手元で §3 を実施して記入する）
+2026-09-15、Dev Container から `scripts/fs-check.sh all` を 2 回（2 回目は `SIZES=52428800`）、`restart-mark` → `gcloud run services update --update-env-vars` で新リビジョン → `restart-verify`、`external`、`cleanup` を実施。**全 case `ok: true`、`restart-verify` / `external` とも期待どおり**（結果の全行は PR #18 のコメント）。
+
+環境: リビジョン `poc-app-00007` → `00008`、PHP 8.3.33（apache2handler）、`memory_limit` 128M、実行 uid/gid **33**、`/proc/mounts` は `fuse.gcsfuse rw,nosuid,nodev,relatime,user_id=0,group_id=0,default_permissions,allow_other`。
 
 | 確認 | 結果 | 備考 |
 |---|---|---|
-| `info`（uid / gid / mount 行） | （記入） | gcsfuse の起動ログでは `uid:1033 gid:1033`（docs/03 §6 補足） |
-| (a) `rmw` | （記入） | |
-| (b) `rename` / 原子性 | （記入） | |
-| (c) `lock` / `lock-hold` | （記入） | |
-| (d) `append` | （記入） | |
-| (e) `restart-mark` → `restart-verify` | （記入） | |
-| (f) `size` 100KB / 1MB / 10MB | （記入） | |
-| 追加 `misc` | （記入） | |
-| 追加 `external` | （記入） | |
+| `info` | `DATA_DIR` あり・書き込み可、uid/gid 33 | docs/03 §6 補足の `uid:1033` は gcsfuse 側の表示。PHP は www-data（33）のまま、`allow_other` + file-mode 666 / dir-mode 777 で書けている。`mount_options` は現状維持 |
+| (a) `rmw` ×3 ×2 回 | counter 1→6、毎回 reread 一致。read 44.3 / 1.4 / 0.8ms、write 78.5 / 191.5 / 193.7ms、reread 51.7 / 44.2 / 36.0ms（2 回目も同傾向） | 初回の read はオブジェクトの取得、2 回目以降は同一インスタンスのキャッシュ。write はサイズ 99 バイトでも 0.1〜0.2 秒 |
+| (b) `rename` 1MB | write 138.0 / rename 114.1 / read 111.6ms（2 回目 139.3 / 39.9 / 76.8） | tmp は残らない |
+| (b) `rename-loop` 30 回 + `read-loop` 10 秒 | 1 回目: 読み 3,366 回、欠落 0・途中 0・不正 0、18 版観測。rename min 40.7 / avg 334.0 / **max 4250.5ms**、30 回で 16.8 秒。2 回目: 読み 1,709 回、17 版観測。rename min 39.1 / avg 265.8 / max 4903.8ms | 途中の内容が見えないことは確認できた。並行読み取り中の rename は稀に 4〜5 秒かかる（原因は未特定。読み取り側がオブジェクトを開いている間の世代切り替えと推定）。単独の `rename` は 40〜114ms |
+| (c) `lock` | `file_put_contents(LOCK_EX)` 256（98 / 163ms）、`flock(LOCK_EX)` true（0.1ms）、同一ハンドル `LOCK_NB` true、`LOCK_UN` true、別ハンドル `LOCK_SH\|LOCK_NB` true | docs/01 の予測どおりロックは成功する |
+| (c) `lock-hold` 3 秒 + 0.5 秒後の 0 秒 | 後着の `wait_ms` **2514.6**（2 回目 2482.3）、先着は 0 | 同一インスタンス内で `flock` が直列化される |
+| (d) `append` | 1KB: 73.2 / 181.1 / 158.7ms、1MB: 180.4ms。2 回目（既に 1MB 超）: 1KB 223.9 / 177.6 / 174.1ms、1MB 204.6ms。`filesize` は毎回期待どおり | 追記でも全体再アップロード（2MB 未満） |
+| (e) `restart-mark` → `restart-verify` | mark: counter 7、value 1789471033、instance `3c866098`、rev 00007。verify: instance `2720df2d`、rev 00008、`instance_changed: true`、`fresh: true` | 新インスタンス（新しいマウント）で最新の JSON を読めた |
+| (f) `size` | 100KB: create 105.9 / overwrite 157.4 / tmp 110.8 / rename 48.9 / read 37.1ms。1MB: 103.7 / 166.0 / 124.1 / 46.5 / 38.3。10MB: 235.4 / 308.6 / 205.2 / 38.9 / 112.0。50MB: 630.4 / 1044.6 / 599.8 / 59.6 / 375.9 | 上書きは新規作成より遅い（既存世代の扱いが増える）。50MB でも `memory_limit` 128M に収まった |
+| 追加 `misc` | `chmod` true → perms **666**（反映されない）、`is_writable` true / dir true、`touch` true・mtime 反映、`glob` 10 件 24.2ms、`scandir` 28.3ms、`mkdir` / `rmdir` true | `scandir_count` が 2 少なく出た（gcsfuse は `.` `..` を返さないのに固定で 2 を引いていた集計側の不具合。修正済み） |
+| 追加 `external` | before `EC2 to Cloud Run PoC` → `gcloud storage cp` 直後も同じ（古い）→ 65 秒後 `external-1789471131` | stat cache TTL 60 秒のとおり |
+| `POST /update`（ログ） | `mode=lock read=102.7ms write=181.4ms put=1022.7ms` | アプリ本体の経路。S3 PUT の 1 秒は WIF の初回取得を含む（#8 で内訳を見る） |
+| `smoke.sh` | 全て **403** | `smoke.sh` が ID トークンを付けないため（つまずいた点 3）。Cloud Run 側の問題ではない |
+
+### つまずいた点 3: `scripts/smoke.sh` を Cloud Run に向けると 403
+
+`smoke.sh` はローカル用に書いたので `Authorization` ヘッダを付けず、非公開の Cloud Run では全リクエストが 403 になった。対処: `fs-check.sh` と同じく、`BASE_URL` が `*.run.app` なら `gcloud auth print-identity-token` の ID トークンを自動で付ける（`TOKEN` で明示も可）。Cloud Run に向けるときは `DATA_DIR` を空にし、S3 の確認は実バケット + `AWS_PROFILE` で行う。
+
+```bash
+BASE_URL=$URL DATA_DIR= S3_ENDPOINT= S3_BUCKET=$(terraform -chdir=terraform/aws output -raw bucket_name) scripts/smoke.sh
+```
 
 ## 7. #8 / #9 への引き継ぎ
 
-- **#8（タイムアウト・ステートレス性）**: (c) で `flock` が同一インスタンス内で直列化できると確認できれば、二重送信対策として `concurrency` を 1 にする代わりに `flock` で直列化する選択肢が取れる（現行実装のまま）。(f) の所要時間はリクエストタイムアウトと比較する
-- **#9（コールドスタート）**: (e) の `restart-verify` で新インスタンスの初回リクエストの所要時間が出るので参考にする。`/tmp/fs-check-instance-id` の仕組みはコールドスタートの検出にも使える
-- マウントオプションは既定 + `uid=33,gid=33` のまま。`external` で古い内容が見えても、アプリだけが書く前提では変更不要。必要なら `metadata-cache-ttl-secs=0`（毎回 GCS と照合。レイテンシは増える）
+- **#8（タイムアウト・ステートレス性）**: (c) で `flock` が同一インスタンス内で直列化されることを確認した（後着 2.5 秒待ち）ので、二重送信対策は `concurrency=1` にしなくても現行実装の `LOCK_EX` で直列化できる。`POST /update` の実測は read 0.1 秒 / write 0.2 秒 / S3 PUT 1.0 秒（WIF 初回込み）で、タイムアウト 300 秒に対して余裕がある
+- **#9（コールドスタート）**: 新インスタンスの初回 read は 33〜44ms（2 回目以降 1ms）。`/tmp/fs-check-instance-id` の仕組みはインスタンスの入れ替わりの検出にそのまま使える
+- マウントオプションは既定 + `uid=33,gid=33` のまま。アプリだけが書く前提では `metadata-cache-ttl-secs` を変えない（変えると毎回 GCS と照合してレイテンシが増える）。アプリ以外で書き換えたときは 60 秒待つか新リビジョンにする
+- 並行読み取り中の `rename` の裾（最大 4〜5 秒）は現行の `WRITE_MODE=lock` では発生しない経路。`rename` 方式に切り替える場合の注意として残す
