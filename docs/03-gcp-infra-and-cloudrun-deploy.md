@@ -238,12 +238,12 @@ terraform -chdir=terraform/gcp apply
 
 補足:
 
-- gcsfuse は `uid=33,gid=33` を指定しても起動ログ上は `uid:1033 gid:1033` で動く（Cloud Run 側で 1000 ずらして適用）。`file-mode 666 / dir-mode 777` のため www-data からの書き込みには支障が無く、実際に `data.json` が書けている。扱いは #7 で決める
+- gcsfuse は `uid=33,gid=33` を指定しても起動ログ上は `uid:1033 gid:1033` で動く（Cloud Run 側で 1000 ずらして適用）。`file-mode 666 / dir-mode 777` のため www-data からの書き込みには支障が無く、実際に `data.json` が書けている。#7 で確認: PHP は uid/gid 33 で動き、`allow_other` で書けているので現状維持（`docs/05` §6）
 - Apache の `AH00558: Could not reliably determine the server's fully qualified domain name` は警告のみ。気になる場合は `ServerName localhost` を Apache 設定に足す（#10 の運用面で扱う）
 - 起動時のログにサービス単位の `run.googleapis.com/maxScale: '3'` アノテーション（サービスレベルの上限）が付く。テンプレートの `maxScale: '1'` が有効なので実害は無いが、#8 / #9 で挙動を確認する
 
 ## 7. #6 / #7 へ引き継ぐ事項
 
 - **#6（S3 認証）**: `terraform output service_account_email` と `service_account_unique_id` を AWS 側の IAM ロールの信頼ポリシーに使う。`S3_BUCKET` は `var.s3_bucket` で差し替える → `docs/04` で実施（`aws_role_arn` を追加）
-- **#7（gcsfuse 読み書き）**: `mount_options` は既定 + `uid=33,gid=33` で開始。鮮度の問題が出たら `metadata-cache-ttl-secs=0` を追加する。`WRITE_MODE` は `var.write_mode` で切り替えられる
+- **#7（gcsfuse 読み書き）**: `mount_options` は既定 + `uid=33,gid=33` で開始。鮮度の問題が出たら `metadata-cache-ttl-secs=0` を追加する。`WRITE_MODE` は `var.write_mode` で切り替えられる → `docs/05` で実施（診断経路 `POST /fs-check` と `scripts/fs-check.sh`。`fs_check` 変数で有効化）
 - **#8 / #9**: `concurrency` / `request_timeout` / `min_instance_count`（現状 0 固定）を変数化・調整する

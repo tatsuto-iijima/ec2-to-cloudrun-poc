@@ -70,6 +70,12 @@ variable "write_mode" {
   }
 }
 
+variable "fs_check" {
+  description = "診断用の経路 POST /fs-check（gcsfuse 検証。docs/05）を有効にするか。#7 の検証中だけ true にし、終わったら false に戻す"
+  type        = bool
+  default     = false
+}
+
 variable "max_instances" {
   description = "Cloud Run の最大インスタンス数。一人で操作する前提のため 1（複数インスタンスに起因する gcsfuse のキャッシュ不整合を避ける）"
   type        = number

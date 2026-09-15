@@ -43,6 +43,8 @@ final class Config
         public readonly ?string $stsEndpoint,
         /** メタデータサーバーのホスト。Google のクライアントライブラリと同じ GCE_METADATA_HOST で差し替えられる */
         public readonly string $metadataHost,
+        /** 診断用の経路 POST /fs-check（Issue #7 の gcsfuse 検証）を有効にするか。検証中だけ true にする */
+        public readonly bool $fsCheckEnabled = false,
     ) {
         if (!in_array($this->writeMode, [self::WRITE_MODE_LOCK, self::WRITE_MODE_RENAME], true)) {
             throw new InvalidArgumentException(
@@ -80,6 +82,7 @@ final class Config
             awsRoleDurationSeconds: (int) self::env('AWS_ROLE_DURATION_SECONDS', '3600'),
             stsEndpoint: self::env('STS_ENDPOINT'),
             metadataHost: self::env('GCE_METADATA_HOST', 'metadata.google.internal'),
+            fsCheckEnabled: self::envBool('FS_CHECK', false),
         );
     }
 

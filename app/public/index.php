@@ -9,11 +9,13 @@ declare(strict_types=1);
  *   GET  /        JSON の現在値を表示し、更新フォームを出す
  *   POST /update  JSON を更新して書き戻し、S3 へアップロードする
  *   GET  /health 死活確認（ファイルにも S3 にも触らない）
+ *   POST /fs-check  gcsfuse 検証用の診断（FS_CHECK=1 のときだけ。Issue #7。scripts/fs-check.sh から呼ぶ）
  *
  * Apache では FallbackResource で、PHP 内蔵サーバーではルータースクリプトとして、すべてのパスがここに来る。
  */
 
 use App\Config;
+use App\FsCheck;
 use App\GoogleWebIdentityCredentialProvider;
 use App\JsonStore;
 use App\S3Uploader;
@@ -91,6 +93,18 @@ try {
             ($t2 - $t1) / 1e6,
             ($t3 - $t2) / 1e6
         )));
+    }
+
+    // DATA_DIR 上のファイル操作を検証する診断（gcsfuse の挙動を計測する。data.json には触らない）。
+    // 無効時は存在しない経路として扱う
+    if ($method === 'POST' && $path === '/fs-check' && $config->fsCheckEnabled) {
+        $params = array_map(static fn (mixed $v): string => (string) $v, $_POST);
+        $case = $params['case'] ?? 'info';
+        $result = (new FsCheck($config))->run($case, $params);
+        error_log(sprintf('fs-check case=%s ok=%s total=%.1fms', $case, $result['ok'] ? 'true' : 'false', $result['total_ms']));
+        header('Content-Type: application/json');
+        echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+        exit;
     }
 
     http_response_code(404);
