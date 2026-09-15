@@ -13,6 +13,8 @@ services:
       - .:/workspace:cached
       # イメージ内の vendor/ は隠れるので、postCreateCommand の composer install で生成する
       - ./app:/var/www/html:cached
+      # 手元の AWS 認証情報（terraform/aws と aws CLI 用）。読み取り専用。無ければ空ディレクトリになるだけ
+      - ~/.aws:/home/vscode/.aws:ro
     environment:
       # scripts/smoke.sh 用（同一コンテナ内なので localhost）。DATA_DIR / S3_* / AWS_* は基の compose と .env から入る
       BASE_URL: http://localhost:8080
