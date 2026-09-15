@@ -71,7 +71,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 ```
 CLAUDE.md         このファイル（AI 駆動開発の前提・ルール）
 README.md         リポジトリの概要
-.devcontainer/    Dev Container（docker-compose.yml の app サービスをベース。AWS CLI / Terraform は features、gcloud は Dockerfile の dev ステージ。~/.aws を読み取り専用でマウント）
+.devcontainer/    Dev Container（docker-compose.yml の app サービスをベース。AWS CLI / Terraform は features、gcloud は Dockerfile の dev ステージ。~/.aws は名前付きボリュームで永続化し、SSO はコンテナ内で行う）
 app/              サンプル PHP アプリ（public/, src/, composer.json）
 docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / composer / gcloud CLI）, Apache 設定
 docker-compose.yml ローカル起動用
@@ -216,7 +216,9 @@ terraform -chdir=terraform/gcp destroy                                          
 ```bash
 # .env の moto 用アクセスキーが環境変数に入っている。環境変数のキーはプロファイルより優先されるので、実 AWS を触るシェルでは外す
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-export AWS_PROFILE=<profile>       # ホストの ~/.aws を読み取り専用でマウント済み。認証情報の設定（aws configure / SSO）はホスト側で行う
+aws configure sso --use-device-code                   # 初回のみ。~/.aws は名前付きボリュームなので Rebuild 後も残る
+aws sso login --use-device-code --profile <profile>   # トークンが切れたとき。URL とコードをホストのブラウザで開く（コンテナ内では既定のブラウザ連携が使えない）
+export AWS_PROFILE=<profile>
 aws sts get-caller-identity
 
 cp terraform/aws/terraform.tfvars.example terraform/aws/terraform.tfvars   # bucket_name, google_service_account_unique_id を記入
