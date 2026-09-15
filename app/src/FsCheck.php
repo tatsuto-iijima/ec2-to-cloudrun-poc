@@ -454,6 +454,8 @@ final class FsCheck
         $t = hrtime(true);
         $scandir = scandir($dir);
         $scandirMs = $this->ms($t);
+        // gcsfuse の readdir は . と .. を返さないので、固定で 2 を引かずに除外して数える
+        $scandirCount = $scandir === false ? null : count(array_diff($scandir, ['.', '..']));
 
         $sub = $dir . '/subdir-' . bin2hex(random_bytes(2));
         $mkdir = @mkdir($sub, 0775);
@@ -472,7 +474,7 @@ final class FsCheck
             'mtime' => $mtime,
             'glob_count' => $glob === false ? null : count($glob),
             'glob_ms' => $globMs,
-            'scandir_count' => $scandir === false ? null : count($scandir) - 2,
+            'scandir_count' => $scandirCount,
             'scandir_ms' => $scandirMs,
             'mkdir' => $mkdir,
             'mkdir_is_dir' => $isDir,
