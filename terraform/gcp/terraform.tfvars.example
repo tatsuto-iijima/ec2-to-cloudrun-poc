@@ -19,5 +19,6 @@ invoker_member = "user:you@example.com"
 # region        = "asia-northeast1"
 # aws_wif_audience = ""            # 空ならロールの ARN（terraform/aws の audience と揃える）
 # write_mode    = "lock"
+# fs_check      = true            # #7 の gcsfuse 検証中だけ（POST /fs-check を有効にする。docs/05）
 # concurrency   = 80
 # request_timeout = "300s"
