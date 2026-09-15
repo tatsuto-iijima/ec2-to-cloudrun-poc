@@ -77,7 +77,7 @@ scripts/fs-check.sh external                   # 直後 / 65 秒後の GET / で
 
 # 5. 後片付け（fs-check/ を消し、診断経路を無効に戻す）
 scripts/fs-check.sh cleanup
-sed -i '' '/^fs_check/d' terraform/gcp/terraform.tfvars   # macOS。Linux は sed -i '/^fs_check/d' ...
+sed -i '/^fs_check/d' terraform/gcp/terraform.tfvars      # Dev Container（GNU sed）。macOS のホストで実行するなら sed -i '' '/^fs_check/d' ...
 terraform -chdir=terraform/gcp apply           # FS_CHECK が空になり、FS_CHECK_RESTART も消える
 
 # 参考: gcsfuse 側のログ（マウント時のオプション、エラー）
