@@ -129,6 +129,7 @@ docs/             検証レポート（検証項目ごとに 1 ファイル）+ 
 - クラウドリソースは Terraform で作成し、PoC 終了時に `terraform destroy` で削除する（コスト抑制）
 - 認証情報（AWS アクセスキー、サービスアカウント鍵、`terraform.tfvars` の秘匿値、`.env`）はリポジトリにコミットしない。`.gitignore` で除外する
 - 長期クレデンシャルをコンテナイメージや環境変数に置かない構成を優先する（S3 認証は WIF 主案）
+- Terraform の state はローカル（`terraform.tfstate`。gitignore 済み）なので、`apply` は 1 つの環境から行う。環境を変えるときは `terraform.tfstate` を持っていくか、既存資源を `terraform import` する（`docs/03` つまずいた点 7）
 
 ## 6. ローカルでの起動・検証コマンド
 
