@@ -71,7 +71,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 ```
 CLAUDE.md         このファイル（AI 駆動開発の前提・ルール）
 README.md         リポジトリの概要
-.devcontainer/    Dev Container（docker-compose.yml の app サービスをベース。AWS CLI / Terraform は features、gcloud は Dockerfile の dev ステージ。~/.aws は名前付きボリュームで永続化し、SSO はコンテナ内で行う）
+.devcontainer/    Dev Container（docker-compose.yml の app サービスをベース。AWS CLI / Terraform は features、gcloud は Dockerfile の dev ステージ。~/.aws と ~/.config/gcloud は名前付きボリュームで永続化し、AWS の SSO も gcloud の認証もコンテナ内で行う）
 app/              サンプル PHP アプリ（public/, src/, composer.json）
 docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / composer / gcloud CLI）, Apache 設定
 docker-compose.yml ローカル起動用
@@ -194,7 +194,7 @@ BASE_URL=http://127.0.0.1:8080 DATA_DIR=$PWD/data scripts/smoke.sh
 ### GCP（Dev Container 内で実施。詳細は `docs/03`）
 
 ```bash
-gcloud auth login --no-launch-browser && gcloud auth application-default login --no-launch-browser
+gcloud auth login --no-launch-browser && gcloud auth application-default login --no-launch-browser   # 初回のみ。~/.config/gcloud は名前付きボリュームなので Rebuild 後も残る
 gcloud config set project <PROJECT_ID>
 cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars   # project_id, invoker_member を記入
 
