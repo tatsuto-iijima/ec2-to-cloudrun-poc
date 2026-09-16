@@ -12,7 +12,7 @@ use RuntimeException;
  *
  * アプリと同じプロセス（Apache + mod_php、www-data、同じマウント）で測るために、
  * POST /fs-check（FS_CHECK=1 のときだけ有効）から呼ばれる。scripts/fs-check.sh が case を順に呼び出す。
- * 検証用のファイルは DATA_DIR/fs-check/ 配下に置き、data.json には触らない。
+ * 検証用のファイルは DATA_DIR/fs-check/ 配下に置き、data.json には触らない（例外は #8 用の pad case）。
  */
 final class FsCheck
 {
@@ -54,6 +54,7 @@ final class FsCheck
             'append' => $this->append($size),
             'size' => $this->size($size),
             'misc' => $this->misc(),
+            'pad' => $this->pad($size),
             'cleanup' => $this->cleanup(),
             default => throw new InvalidArgumentException(sprintf('未知の case です: %s', $case)),
         };
@@ -479,6 +480,37 @@ final class FsCheck
             'mkdir' => $mkdir,
             'mkdir_is_dir' => $isDir,
             'rmdir' => $rmdir,
+        ];
+    }
+
+    /**
+     * data.json 本体に size バイトの埋め草（pad キー）を入れる（0 なら外す）。#8 で POST /update をサイズ別に計測するために使う。
+     * S3 には PUT しない（次の POST /update が PUT する）。
+     *
+     * @return array<string, mixed>
+     */
+    private function pad(int $size): array
+    {
+        $store = new JsonStore($this->config);
+        $data = $store->read();
+        if ($size > 0) {
+            $data['pad'] = str_repeat('x', $size);
+        } else {
+            unset($data['pad']);
+        }
+
+        $t = hrtime(true);
+        $store->write($data);
+        $writeMs = $this->ms($t);
+        unset($data);
+
+        $path = $this->config->dataPath();
+        clearstatcache(true, $path);
+
+        return [
+            'pad' => $size,
+            'bytes' => filesize($path),
+            'write_ms' => $writeMs,
         ];
     }
 
