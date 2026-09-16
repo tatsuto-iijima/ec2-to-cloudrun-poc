@@ -7,7 +7,7 @@ declare(strict_types=1);
  *
  * ルーティング:
  *   GET  /        JSON の現在値を表示し、更新フォームを出す
- *   POST /update  JSON を更新して書き戻し、S3 へアップロードする
+ *   POST /update  JSON を更新して書き戻し、S3 へアップロードする（Updater。flock で直列化）
  *   GET  /health 死活確認（ファイルにも S3 にも触らない）
  *   POST /fs-check  gcsfuse 検証用の診断（FS_CHECK=1 のときだけ。Issue #7。scripts/fs-check.sh から呼ぶ）
  *
@@ -19,6 +19,7 @@ use App\FsCheck;
 use App\GoogleWebIdentityCredentialProvider;
 use App\JsonStore;
 use App\S3Uploader;
+use App\Updater;
 
 require __DIR__ . '/../vendor/autoload.php';
 
@@ -56,42 +57,34 @@ try {
             redirect('/?error=' . rawurlencode('value が長すぎます（10000 バイトまで）'));
         }
 
-        // 読み → 更新 → 書き戻し → S3 へ PUT。各段階の所要時間をログに残す（#7 #8 の計測に使う）
-        $t0 = hrtime(true);
-        $data = $store->read();
-        $t1 = hrtime(true);
-
-        $data[$key] = $value;
-        $data['counter'] = (int) ($data['counter'] ?? 0) + 1;
-        $data['updated_at'] = (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format(DATE_ATOM);
-
-        $store->write($data);
-        $t2 = hrtime(true);
-
+        // 読み → 更新 → 書き戻し → S3 へ PUT（Updater が flock で直列化する。docs/06）。各段階の所要時間をログに残す
         // Cloud Run では SA の ID トークンで AWS の IAM ロールを引き受ける（鍵レス）。ローカル（moto）では SDK の既定チェーン
         $credentials = $config->usesWebIdentity() ? new GoogleWebIdentityCredentialProvider($config) : null;
         $uploader = new S3Uploader($config, $credentials);
-        $etag = $uploader->put(file_get_contents($config->dataPath()) ?: '');
-        $t3 = hrtime(true);
+        $r = (new Updater($config, $store, $uploader))->update($key, $value);
 
         error_log(sprintf(
-            'update key=%s mode=%s read=%.1fms write=%.1fms put=%.1fms target=%s etag=%s',
+            'update key=%s mode=%s lock=%.1fms read=%.1fms write=%.1fms put=%.1fms bytes=%d counter=%d target=%s etag=%s',
             $key,
             $config->writeMode,
-            ($t1 - $t0) / 1e6,
-            ($t2 - $t1) / 1e6,
-            ($t3 - $t2) / 1e6,
+            $r['lock_wait_ms'],
+            $r['read_ms'],
+            $r['write_ms'],
+            $r['put_ms'],
+            $r['bytes'],
+            $r['counter'],
             $uploader->targetUri(),
-            $etag
+            $r['etag']
         ));
 
+        // 所要時間は画面にも出す（scripts/update-bench.sh が Location からこの形式を読み取る）
         redirect('/?result=' . rawurlencode(sprintf(
             '%s を更新し、%s へアップロードしました（read %.1fms / write %.1fms / put %.1fms）',
             $key,
             $uploader->targetUri(),
-            ($t1 - $t0) / 1e6,
-            ($t2 - $t1) / 1e6,
-            ($t3 - $t2) / 1e6
+            $r['read_ms'],
+            $r['write_ms'],
+            $r['put_ms']
         )));
     }
 
