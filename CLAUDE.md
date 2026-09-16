@@ -25,7 +25,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 |---|---|
 | コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer / gcloud CLI 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
 | 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1` |
-| 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す |
+| 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す。#7 の実測: 書き込みは 1 回 0.1〜0.2 秒（全体再アップロード）、読み込み 40ms（同一インスタンスで読み直すと 1ms）、`flock` は同一インスタンス内で直列化される、アプリ以外で書き換えたオブジェクトは最大 60 秒古い内容が見える（`docs/05`） |
 | IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割。state は GCS の remote backend（バケット `<PROJECT_ID>-tfstate` を prefix `gcp` / `aws` で共有。ロック内蔵）。init は `scripts/tf-init.sh gcp\|aws` |
 | S3 認証（主案） | Workload Identity Federation の逆方向。AWS IAM ロールの信頼ポリシーに `accounts.google.com` の Web Identity を設定し、条件キー（`sub` / `aud` = SA の一意 ID、`oaud` = ロール ARN）で Cloud Run のサービスアカウントに限定。PHP 側（`app/src/GoogleWebIdentityCredentialProvider.php`）はメタデータサーバーから ID トークンを取得し STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得て `/tmp` にキャッシュする。**鍵レス**（#6 で実装。`docs/04`） |
 | S3 認証（代替案） | IAM ユーザーのアクセスキーを Secret Manager に格納して Cloud Run に注入。主案が成立しない場合のみ |
@@ -45,8 +45,9 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 
 - `GET /` : JSON の現在値を表示し、更新フォームを出す
 - `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303。各段階の所要時間（ms）を `error_log` に 1 行出す
+- `POST /fs-check` : gcsfuse 検証用の診断（Issue #7、`docs/05`）。**`FS_CHECK=1` のときだけ有効**（無効時は 404）。`DATA_DIR/fs-check/` 配下で `case`（`rmw` / `rename` / `lock` / `append` / `size` など）を実行して所要時間と戻り値を JSON で返す。`scripts/fs-check.sh` から呼ぶ
 - `GET /health` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）。**`/healthz` は使わない**: Cloud Run の予約済み URL パス（`/eventlog`、`/_ah/` で始まるパス、**末尾が `z` のパス**）は Google のフロントエンドが横取りして 404 を返し、コンテナに届かない。経路を足すときもこの 3 種は避ける（Cloud Run の既知の問題「予約済みの URL パス」。docs/03 つまずいた点 5）
-- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/S3Uploader.php`（S3 PUT）、`app/src/GoogleWebIdentityCredentialProvider.php`（WIF の認証）、`app/templates/index.php`（画面）
+- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/S3Uploader.php`（S3 PUT）、`app/src/GoogleWebIdentityCredentialProvider.php`（WIF の認証）、`app/src/FsCheck.php`（`/fs-check` の診断ロジック）、`app/templates/index.php`（画面）
 
 | 環境変数 | 既定 | 説明 |
 |---|---|---|
@@ -65,6 +66,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | `AWS_ROLE_DURATION_SECONDS` | `3600` | 一時クレデンシャルの有効期間（900 以上、ロールの `max_session_duration` 以下）。期限 5 分前に取り直す |
 | `STS_ENDPOINT` | 未設定 | STS 互換エンドポイント（ローカルの moto）。未設定なら本物の STS（リージョナル） |
 | `GCE_METADATA_HOST` | `metadata.google.internal` | メタデータサーバーのホスト。ローカル検証で偽サーバーに向けるときだけ変える |
+| `FS_CHECK` | 未設定 | `1` で診断経路 `POST /fs-check` を有効にする（Terraform の `fs_check` 変数）。#7 の検証中だけ |
 
 ## 4. リポジトリ構成
 
@@ -79,7 +81,7 @@ cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registr
 .gcloudignore     Cloud Build に送らないファイル
 terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state は GCS）
 terraform/aws/    S3 バケット / IAM ロール（信頼ポリシーで Google の SA を指定。権限は s3:PutObject のみ。#6 で作成。state は GCS）
-scripts/          tf-init.sh（state バケットの作成と terraform init）、build-push.sh（Cloud Build）、smoke.sh、計測スクリプト
+scripts/          tf-init.sh（state バケットの作成と terraform init）、build-push.sh（Cloud Build）、smoke.sh、fs-check.sh（gcsfuse 読み書きの計測。#7）
 docs/             検証レポート（検証項目ごとに 1 ファイル）+ 最終判定
 ```
 
@@ -191,6 +193,7 @@ BASE_URL=http://127.0.0.1:8080 DATA_DIR=$PWD/data scripts/smoke.sh
 
 - 構文チェック: `for f in app/public/index.php app/templates/index.php app/src/*.php; do php -l "$f"; done`
 - サーバーを止めるときは `pkill -f "^php -S"`（`pkill -f "php -S"` は自分のシェルにも一致することがある）
+- `scripts/fs-check.sh` をローカルで試すときは `FS_CHECK=1` に加えて **`PHP_CLI_SERVER_WORKERS=4`** を付けて起動する（既定の 1 ワーカーでは並行リクエストが直列化され、(b) 原子性と (c) 直列化が測れない。`docs/05` §5）。moto は不要（S3 に触らない）
 
 ### GCP（Dev Container 内で実施。詳細は `docs/03`）
 
@@ -211,6 +214,19 @@ terraform -chdir=terraform/gcp destroy                                          
 
 - Cloud Run は非公開（`invoker_member` にだけ `roles/run.invoker`）。`allUsers` には付与しない
 - Claude Code の作業環境では `apply` できない（GCP の認証情報が無い）。`terraform fmt` / `validate` までを行い、`apply` と動作確認はユーザーの手元で実施する。provider は `releases.hashicorp.com` から filesystem mirror で取得する（`registry.terraform.io` は遮断）
+
+### gcsfuse 読み書き検証（Dev Container 内で実施。詳細は `docs/05`）
+
+```bash
+echo 'fs_check = true' >> terraform/gcp/terraform.tfvars                        # 診断経路を有効化（検証中だけ）
+scripts/build-push.sh && terraform -chdir=terraform/gcp apply                    # アプリが変わっていれば再ビルド → 新リビジョン
+export BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url)
+scripts/fs-check.sh                                                              # (a)(b)(c)(d)(f) + 追加項目。結果は fs-check-results.jsonl
+scripts/fs-check.sh restart-mark   # → 15 分放置 or 新リビジョン作成 → scripts/fs-check.sh restart-verify   # (e)
+scripts/fs-check.sh external                                                     # gcloud storage cp で直接書き換えたときの見え方
+scripts/fs-check.sh cleanup                                                      # DATA_DIR/fs-check/ を削除。終わったら fs_check を消して apply
+BASE_URL=$BASE_URL DATA_DIR= S3_ENDPOINT= S3_BUCKET=$(terraform -chdir=terraform/aws output -raw bucket_name) scripts/smoke.sh   # smoke.sh も Cloud Run に向けられる（run.app なら ID トークンを自動付与）
+```
 
 ### AWS（Dev Container 内で実施。詳細は `docs/04`）
 

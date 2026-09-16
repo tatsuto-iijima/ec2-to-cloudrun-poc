@@ -8,6 +8,9 @@
 /data/*
 !/data/.gitkeep
 
+# scripts/fs-check.sh の結果（docs/05 に転記する）
+/fs-check-results.jsonl
+
 # Terraform
 **/.terraform/
 # provider の lock は各自の環境（CPU アーキテクチャ）で生成する

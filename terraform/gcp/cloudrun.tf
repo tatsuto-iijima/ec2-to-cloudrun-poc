@@ -69,6 +69,11 @@ resource "google_cloud_run_v2_service" "app" {
         name  = "AWS_WIF_AUDIENCE"
         value = var.aws_wif_audience
       }
+      # gcsfuse 検証用の診断経路（#7）。空文字なら無効（Config は空を未設定扱いにする）
+      env {
+        name  = "FS_CHECK"
+        value = var.fs_check ? "1" : ""
+      }
 
       volume_mounts {
         name       = "data"
