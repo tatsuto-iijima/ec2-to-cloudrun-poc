@@ -219,7 +219,7 @@ terraform -chdir=terraform/gcp destroy                                          
 ### gcsfuse 読み書き検証（Dev Container 内で実施。詳細は `docs/05`）
 
 ```bash
-echo 'fs_check = true' >> terraform/gcp/terraform.tfvars                        # 診断経路を有効化（検証中だけ）
+grep -q '^fs_check' terraform/gcp/terraform.tfvars || echo 'fs_check = true' >> terraform/gcp/terraform.tfvars   # 診断経路を有効化（検証中だけ。冪等）
 scripts/build-push.sh && terraform -chdir=terraform/gcp apply                    # アプリが変わっていれば再ビルド → 新リビジョン
 export BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url)
 scripts/fs-check.sh                                                              # (a)(b)(c)(d)(f) + 追加項目。結果は fs-check-results.jsonl
