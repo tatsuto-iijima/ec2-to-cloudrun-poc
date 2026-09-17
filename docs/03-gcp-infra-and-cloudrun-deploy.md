@@ -219,6 +219,24 @@ terraform -chdir=terraform/gcp apply
 - 代替: 元の環境の `terraform/gcp/terraform.tfstate` をコピーして持ってくれば import は不要
 - 今後: → **PR #17 で GCS の remote backend に切り替えた**（`terraform/gcp` / `terraform/aws` とも。バケット `<PROJECT_ID>-tfstate`）。`terraform init` の代わりに `scripts/tf-init.sh gcp|aws` を使う。ローカルに state が残っている環境では `-migrate-state` で GCS に移行され、以後はどの環境からも同じ state を見る（`gcs` backend はロックを内蔵しているので同時 apply も防げる）
 
+### つまずいた点 8: 時間が経つと Terraform だけ `invalid_grant (invalid_rapt)` になる（2026-09-17）
+
+```
+Error: Failed to load state: Failed to open state file at gs://<PROJECT_ID>-tfstate/gcp/default.tfstate:
+  ... auth: "invalid_grant" "reauth related error (invalid_rapt)" "https://support.google.com/a/answer/9368756"
+```
+
+原因: Terraform の `gcs` backend と google provider は **Application Default Credentials（ADC）**（`gcloud auth application-default login` が作る `~/.config/gcloud/application_default_credentials.json`）を使う。組織配下の Google アカウントには再認証ポリシー（セッション制御）が効いており、期限を過ぎると ADC のリフレッシュトークンが `invalid_rapt`（再認証の証明が無効）で拒否される。`gcloud auth login` の資格情報とは**別物**なので、`gcloud` コマンドは通るのに Terraform だけ失敗する。PR #17 で `~/.config/gcloud` を名前付きボリュームにしたため、Dev Container を Rebuild しても古い ADC が残り、この現象が出る。コードや Terraform の問題ではない。
+
+対処: ADC を取り直すだけ。
+
+```bash
+gcloud auth application-default login --no-launch-browser
+terraform -chdir=terraform/gcp apply          # 途中だった手順の続きをそのまま実行できる
+```
+
+`gcloud auth login` 側も切れていれば `gcloud auth login --no-launch-browser` も行う。`terraform/aws` も state は GCS なので同じ症状・同じ対処。
+
 ## 6. 実機での確認結果
 
 2026-09-14、Dev Container（macOS / Apple Silicon）から実施。プロジェクトは組織配下の新規プロジェクト（無料トライアル）、リージョン asia-northeast1。
