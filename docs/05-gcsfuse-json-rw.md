@@ -58,7 +58,7 @@ Cloud Run の `/tmp` はインスタンス単位のインメモリ FS なので�
 
 ```bash
 # 1. 診断経路を有効にしてデプロイ（アプリが変わるので再ビルドが必要）
-echo 'fs_check = true' >> terraform/gcp/terraform.tfvars
+grep -q '^fs_check' terraform/gcp/terraform.tfvars || echo 'fs_check = true' >> terraform/gcp/terraform.tfvars   # 既にあれば足さない（やり直しても 1 行のまま）
 scripts/build-push.sh                          # 新しいイメージを push（image.auto.tfvars が更新される）
 terraform -chdir=terraform/gcp apply           # FS_CHECK=1 と新イメージで新リビジョン
 

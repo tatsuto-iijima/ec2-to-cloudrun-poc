@@ -37,8 +37,8 @@ JSON を大きくする手段だけ診断経路に足した: `POST /fs-check cas
 
 ```bash
 # 1. 診断経路を有効にしてデプロイ（アプリが変わるので再ビルド）
-echo 'fs_check = true' >> terraform/gcp/terraform.tfvars
-scripts/build-push.sh && terraform -chdir=terraform/gcp apply
+grep -q '^fs_check' terraform/gcp/terraform.tfvars || echo 'fs_check = true' >> terraform/gcp/terraform.tfvars   # 既にあれば足さない（やり直しても 1 行のまま）
+scripts/build-push.sh && terraform -chdir=terraform/gcp apply   # 途中で失敗してやり直すときは build-push.sh は不要（image.auto.tfvars に push 済みタグが残る）
 export BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url)
 SVC=$(terraform -chdir=terraform/gcp output -raw service_name)
 
