@@ -213,7 +213,7 @@ terraform -chdir=terraform/gcp destroy                                          
 ```
 
 - Cloud Run は非公開（`invoker_member` にだけ `roles/run.invoker`）。`allUsers` には付与しない
-- Terraform が `invalid_grant` / `invalid_rapt` で state を読めなくなったら ADC の再認証切れ（組織アカウントのセッション制御。`gcloud auth login` とは別物）。`gcloud auth application-default login --no-launch-browser` で取り直す（`docs/03` つまずいた点 8）
+- Terraform が `invalid_grant` / `invalid_rapt` で state を読めない、または `gcloud` が `Reauthentication required. Please enter your password:` を出したら、組織アカウントの再認証切れ。資格情報は gcloud 用と ADC（Terraform 用）の 2 種類あり別々に切れるので、`gcloud auth login --no-launch-browser && gcloud auth application-default login --no-launch-browser` で 2 つとも取り直す（パスワードのプロンプトは Ctrl-C で抜けてよい。`docs/03` つまずいた点 8）
 - Claude Code の作業環境では `apply` できない（GCP の認証情報が無い）。`terraform fmt` / `validate` までを行い、`apply` と動作確認はユーザーの手元で実施する。provider は `releases.hashicorp.com` から filesystem mirror で取得する（`registry.terraform.io` は遮断）
 
 ### gcsfuse 読み書き検証（Dev Container 内で実施。詳細は `docs/05`）
