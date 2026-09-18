@@ -141,11 +141,11 @@ B の結果は「2 回目も順に適用される」（counter は 2 回分進�
 | S3 転送（GCP asia-northeast1 → S3 ap-northeast-1） | 1MB 0.16〜0.19 秒、10MB 0.26〜0.36 秒、50MB 0.90〜0.97 秒 ≒ 51〜56 MB/s | #11 の入力。1MB はレイテンシ支配（約 150ms） |
 | `double-submit` 5 本 | 全部 303。total 363 / 664 / 952 / 1215 / 1505 ms（約 290ms 間隔で順に完了）、read 0.4〜0.7 / write 168〜187 / put 93〜128 ms。counter 16 → 21 | 直列化されている（各リクエストの処理 = write 0.18 秒 + put 0.1 秒 ≒ 0.29 秒 = 完了間隔）。ログの `lock=` は未取得だが total の階段で確認できる |
 | インスタンス入れ替え | mark: counter 22 / fs-check 1789686928 / instance `1f7cc46a` / rev 00012 → verify: instance `c2c29c16` / rev 00013、`instance_changed: true`、`fresh: true` | 新インスタンスで最新の JSON を読めた |
-| 入れ替え後の `smoke.sh`（Cloud Run 向け） | `/health` 200、`GET /` 200、`POST /update` **303**、更新値の表示 PASS。**S3 の確認だけ FAIL**（つまずいた点 1） | `POST /update` が 303 = 新インスタンスで WIF を取り直して S3 PUT まで成功している（ログの `wif: credentials refreshed` は未取得。任意） |
+| 入れ替え後の `smoke.sh`（Cloud Run 向け） | 初回は `/health` 200、`GET /` 200、`POST /update` **303**、更新値の表示 PASS で S3 の確認だけ FAIL（つまずいた点 1）。aws CLI の認証を直して再実行し **ALL PASS**（S3 上の `data.json` にも更新値がある） | `POST /update` が 303 = 新インスタンスで WIF を取り直して S3 PUT まで成功している（ログの `wif: credentials refreshed` は未取得。任意） |
 
 ### つまずいた点 1: Cloud Run に向けた `smoke.sh` の S3 確認が FAIL（2026-09-18）
 
-`FAIL: s3://<bucket>/data.json の内容が一致しない` と出たが、アプリ側は `POST /update` が 303 で S3 PUT まで成功している。原因は Dev Container 側の `aws` CLI の認証: `.env` の moto 用 `AWS_ACCESS_KEY_ID=test` が環境変数に残っている、または `AWS_PROFILE` 未設定 / SSO トークン切れで `aws s3 cp` 自体が失敗し、`2>/dev/null` でエラーが捨てられて「一致しない」と表示された。対処: `unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; export AWS_PROFILE=<profile>`（必要なら `aws sso login --use-device-code --profile <profile>`）してから再実行。`smoke.sh` は取得失敗と内容不一致を区別して表示するように直した（取得失敗ならエラーの 1 行目と確認コマンドを出す）。
+`FAIL: s3://<bucket>/data.json の内容が一致しない` と出たが、アプリ側は `POST /update` が 303 で S3 PUT まで成功している。原因は Dev Container 側の `aws` CLI の認証: `.env` の moto 用 `AWS_ACCESS_KEY_ID=test` が環境変数に残っている、または `AWS_PROFILE` 未設定 / SSO トークン切れで `aws s3 cp` 自体が失敗し、`2>/dev/null` でエラーが捨てられて「一致しない」と表示された。対処: `unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; export AWS_PROFILE=<profile>`（必要なら `aws sso login --use-device-code --profile <profile>`）してから再実行。`smoke.sh` は取得失敗と内容不一致を区別して表示するように直した（取得失敗ならエラーの 1 行目と確認コマンドを出す）。認証を直して再実行したところ、S3 の確認を含めて ALL PASS になった。
 
 ## 9. #9 / #11 への引き継ぎ
 
