@@ -22,9 +22,6 @@ final class FsCheck
     /** size パラメータの上限（memory_limit 128M の既定で読み書きできる範囲） */
     private const MAX_SIZE = 64 * 1024 * 1024;
 
-    /** インスタンスを識別する印を置く場所。Cloud Run の /tmp はインスタンス単位のインメモリなので、入れ替わると変わる */
-    private const INSTANCE_ID_FILE = '/tmp/fs-check-instance-id';
-
     public function __construct(private readonly Config $config)
     {
     }
@@ -62,7 +59,8 @@ final class FsCheck
         return [
             'case' => $case,
             'ok' => $result['ok'] ?? true,
-            'instance' => $this->instanceId(),
+            'instance' => InstanceInfo::id(),
+            'instance_uptime' => InstanceInfo::uptimeSeconds(),
             'revision' => getenv('K_REVISION') ?: null,
             'data_dir' => $this->config->dataDir,
             'write_mode' => $this->config->writeMode,
@@ -597,18 +595,6 @@ final class FsCheck
         }
 
         return $value;
-    }
-
-    /** このプロセスが動いているインスタンスの印。初回に /tmp に乱数を置き、同じインスタンスの間は同じ値を返す */
-    private function instanceId(): ?string
-    {
-        $id = @file_get_contents(self::INSTANCE_ID_FILE);
-        if ($id === false || $id === '') {
-            $id = bin2hex(random_bytes(4));
-            @file_put_contents(self::INSTANCE_ID_FILE, $id, LOCK_EX);
-        }
-
-        return $id;
     }
 
     /** /proc/mounts から DATA_DIR のマウント行（ファイルシステム種別とオプション）を探す */
