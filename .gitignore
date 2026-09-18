@@ -27,3 +27,7 @@ crash.log
 
 # scripts/update-bench.sh の結果（docs/06 に転記する）
 /update-bench-results.jsonl
+
+# scripts/cold-start.sh の結果（docs/07 に転記する）
+/cold-start-results.jsonl
+/cold-start.log

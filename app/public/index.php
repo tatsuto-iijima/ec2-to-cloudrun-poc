@@ -17,6 +17,7 @@ declare(strict_types=1);
 use App\Config;
 use App\FsCheck;
 use App\GoogleWebIdentityCredentialProvider;
+use App\InstanceInfo;
 use App\JsonStore;
 use App\S3Uploader;
 use App\Updater;
@@ -25,6 +26,9 @@ require __DIR__ . '/../vendor/autoload.php';
 
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+
+// すべての応答にインスタンスの ID と稼働秒数を付ける（コールドスタートの判定に使う。docs/07）
+InstanceInfo::sendHeaders();
 
 // 死活確認は設定の読み込み前に返す（環境変数の不備でヘルスチェックまで落ちないように）
 if ($method === 'GET' && $path === '/health') {

@@ -82,7 +82,7 @@ terraform -chdir=terraform/gcp apply          # FS_CHECK を空に戻し、FS_CH
 | PHP セッション | 使わない（docs/01 §2） | — | なし |
 | WIF の一時クレデンシャル | `/tmp/aws-wif-credentials.json`（docs/04） | 消える | 次の `POST /update` で STS から取り直す（+約 1 秒。ログに `wif: credentials refreshed`） |
 | 更新のロックファイル | `/tmp/update-<hash>.lock`（`Updater`） | 消える | 次のリクエストで作り直す。ロックは同一インスタンス内でしか効かないので、消えても意味は変わらない |
-| `/tmp/fs-check-instance-id` | 診断用（docs/05） | 消える | インスタンスの入れ替わりを検出する印そのもの |
+| `/tmp/instance-id` | インスタンスの識別（`InstanceInfo`。全応答の `X-Instance-Id` / `X-Instance-Uptime`。docs/05 / docs/07） | 消える | インスタンスの入れ替わりを検出する印そのもの |
 | アップロード一時ファイル、独自ログ、キャッシュ | 無い（docs/01 §2） | — | なし |
 
 `/tmp` は Cloud Run ではインメモリで、インスタンスのメモリ上限（512Mi）に算入される。置いているのは上の 3 ファイル（合計 1KB 未満）だけ。

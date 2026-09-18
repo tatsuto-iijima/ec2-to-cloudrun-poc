@@ -22,7 +22,7 @@ resource "google_cloud_run_v2_service" "app" {
 
     # 一人で操作する前提。max 1 で複数インスタンスに起因する gcsfuse のキャッシュ不整合を構造的に排除する
     scaling {
-      min_instance_count = 0
+      min_instance_count = var.min_instances
       max_instance_count = var.max_instances
     }
     max_instance_request_concurrency = var.concurrency
@@ -41,6 +41,8 @@ resource "google_cloud_run_v2_service" "app" {
         }
         # リクエスト処理中のみ CPU を割り当てる（従量課金の基本構成）
         cpu_idle = true
+        # 起動時の CPU 増強（#9 でコールドスタートへの効果を比較）
+        startup_cpu_boost = var.startup_cpu_boost
       }
 
       # アプリの設定（app/src/Config.php が読む）。AWS のアクセスキーは渡さず、
