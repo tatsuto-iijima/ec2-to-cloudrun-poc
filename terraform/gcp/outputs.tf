@@ -37,3 +37,8 @@ output "service_name" {
   description = "Cloud Run サービス名（gcloud run services proxy 等で使う）"
   value       = var.image == "" ? null : google_cloud_run_v2_service.app[0].name
 }
+
+output "cold_start_config" {
+  description = "コールドスタート計測の構成ラベル（scripts/cold-start.sh が結果に記録する）"
+  value       = "min${var.min_instances}-boost${var.startup_cpu_boost ? 1 : 0}"
+}

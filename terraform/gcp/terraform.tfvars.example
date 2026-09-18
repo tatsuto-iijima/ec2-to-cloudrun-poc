@@ -20,5 +20,7 @@ invoker_member = "user:you@example.com"
 # aws_wif_audience = ""            # 空ならロールの ARN（terraform/aws の audience と揃える）
 # write_mode    = "lock"
 # fs_check      = true            # #7 の gcsfuse 検証中だけ（POST /fs-check を有効にする。docs/05）
+# min_instances = 1               # #9 のコールドスタート比較（常時 1 台。課金が発生するので検証中だけ。docs/07）
+# startup_cpu_boost = true        # #9 のコールドスタート比較
 # concurrency   = 80
 # request_timeout = "300s"
