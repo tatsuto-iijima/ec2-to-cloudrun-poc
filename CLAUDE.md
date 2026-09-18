@@ -24,7 +24,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | 項目 | 選定 |
 |---|---|
 | コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer / gcloud CLI 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
-| 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1`。#8 の実測: `POST /update` は 1MB 0.45 秒 / 50MB 2.8 秒（タイムアウト 300 秒）、新リビジョン直後の初回は +約 1 秒。二重送信は `Updater` の `flock` で直列化済み、インスタンス入れ替え後も継続できる（`docs/06`） |
+| 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1`。`min_instances`（既定 0）と `startup_cpu_boost`（既定 false）は #9 のコールドスタート比較用の変数（`docs/07`）。#8 の実測: `POST /update` は 1MB 0.45 秒 / 50MB 2.8 秒（タイムアウト 300 秒）、新リビジョン直後の初回は +約 1 秒。二重送信は `Updater` の `flock` で直列化済み、インスタンス入れ替え後も継続できる（`docs/06`） |
 | 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す。#7 の実測: 書き込みは 1 回 0.1〜0.2 秒（全体再アップロード）、読み込み 40ms（同一インスタンスで読み直すと 1ms）、`flock` は同一インスタンス内で直列化される、アプリ以外で書き換えたオブジェクトは最大 60 秒古い内容が見える（`docs/05`） |
 | IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割。state は GCS の remote backend（バケット `<PROJECT_ID>-tfstate` を prefix `gcp` / `aws` で共有。ロック内蔵）。init は `scripts/tf-init.sh gcp\|aws` |
 | S3 認証（主案） | Workload Identity Federation の逆方向。AWS IAM ロールの信頼ポリシーに `accounts.google.com` の Web Identity を設定し、条件キー（`sub` / `aud` = SA の一意 ID、`oaud` = ロール ARN）で Cloud Run のサービスアカウントに限定。PHP 側（`app/src/GoogleWebIdentityCredentialProvider.php`）はメタデータサーバーから ID トークンを取得し STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得て `/tmp` にキャッシュする。**鍵レス**（#6 で実装。`docs/04`） |
@@ -46,8 +46,9 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 - `GET /` : JSON の現在値を表示し、更新フォームを出す
 - `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303（`app/src/Updater.php`。全体を `flock` で直列化し、PUT はファイルのストリームで送る）。各段階の所要時間（ms）を `error_log` に 1 行出し、303 の `Location` にも `read / write / put` を入れる（`scripts/update-bench.sh` が読む）
 - `POST /fs-check` : gcsfuse 検証用の診断（Issue #7、`docs/05`）。**`FS_CHECK=1` のときだけ有効**（無効時は 404）。`DATA_DIR/fs-check/` 配下で `case`（`rmw` / `rename` / `lock` / `append` / `size` など）を実行して所要時間と戻り値を JSON で返す。`case=pad` だけは `data.json` 本体に埋め草を入れる（#8 のサイズ別計測用）。`scripts/fs-check.sh` / `scripts/update-bench.sh` から呼ぶ
+- 全応答に `X-Instance-Id`（`/tmp/instance-id` の乱数。インスタンスが入れ替わると変わる）と `X-Instance-Uptime`（最初のリクエストからの秒数）を付ける（`app/src/InstanceInfo.php`。コールドスタート判定に使う。`docs/07`）
 - `GET /health` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）。**`/healthz` は使わない**: Cloud Run の予約済み URL パス（`/eventlog`、`/_ah/` で始まるパス、**末尾が `z` のパス**）は Google のフロントエンドが横取りして 404 を返し、コンテナに届かない。経路を足すときもこの 3 種は避ける（Cloud Run の既知の問題「予約済みの URL パス」。docs/03 つまずいた点 5）
-- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/Updater.php`（`/update` の本体。flock で直列化）、`app/src/S3Uploader.php`（S3 PUT）、`app/src/GoogleWebIdentityCredentialProvider.php`（WIF の認証）、`app/src/FsCheck.php`（`/fs-check` の診断ロジック）、`app/templates/index.php`（画面）
+- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/Updater.php`（`/update` の本体。flock で直列化）、`app/src/S3Uploader.php`（S3 PUT）、`app/src/GoogleWebIdentityCredentialProvider.php`（WIF の認証）、`app/src/FsCheck.php`（`/fs-check` の診断ロジック）、`app/src/InstanceInfo.php`（インスタンス ID と稼働秒数）、`app/templates/index.php`（画面）
 
 | 環境変数 | 既定 | 説明 |
 |---|---|---|
@@ -81,7 +82,7 @@ cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registr
 .gcloudignore     Cloud Build に送らないファイル
 terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state は GCS）
 terraform/aws/    S3 バケット / IAM ロール（信頼ポリシーで Google の SA を指定。権限は s3:PutObject のみ。#6 で作成。state は GCS）
-scripts/          tf-init.sh（state バケットの作成と terraform init）、build-push.sh（Cloud Build）、smoke.sh、fs-check.sh（gcsfuse 読み書きの計測。#7）、update-bench.sh（/update の処理時間と二重送信。#8）
+scripts/          tf-init.sh（state バケットの作成と terraform init）、build-push.sh（Cloud Build）、smoke.sh、fs-check.sh（gcsfuse 読み書きの計測。#7）、update-bench.sh（/update の処理時間と二重送信。#8）、cold-start.sh（アイドル後の初回 TTFB。#9）
 docs/             検証レポート（検証項目ごとに 1 ファイル）+ 最終判定
 ```
 
@@ -236,6 +237,17 @@ BASE_URL=$BASE_URL DATA_DIR= S3_ENDPOINT= S3_BUCKET=$(terraform -chdir=terraform
 scripts/update-bench.sh bench            # 1MB / 10MB / 50MB × 3 回の POST /update（read / write / put と S3 の MB/s）
 scripts/update-bench.sh double-submit    # 5 本同時 → counter がちょうど +5
 scripts/update-bench.sh reset            # data.json の埋め草を外す
+```
+
+### コールドスタート計測（Dev Container 内で実施。詳細は `docs/07`）
+
+```bash
+export BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url)
+# 構成は tfvars の min_instances（0/1）/ startup_cpu_boost（true/false）で切り替えて apply。1 標本 16 分以上かかるので nohup で流す
+nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &     # IDLE（既定 960 秒）待って初回 TTFB を測り、X-Instance-* でコールド判定。N（既定 5）個集める
+scripts/cold-start.sh report                                   # 構成 × パス × cold/warm の p50 / p95
+scripts/cold-start.sh startup-log                              # gcsfuse マウント → 起動プローブ成功の時刻
+# 計測中はサービスに触らない（アイドルが途切れる）。min_instances=1 は課金が発生するので終わったら 0 に戻して apply
 ```
 
 ### AWS（Dev Container 内で実施。詳細は `docs/04`）
