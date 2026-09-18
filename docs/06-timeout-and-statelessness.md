@@ -5,11 +5,13 @@
 
 ## 1. 結論
 
-（実機の結果を反映してから確定する。§8 に記入）
+**合否基準 3 項目すべて成立**（実機 2026-09-18、§8）。Issue #1 の検証項目「Cloud Run のリクエストタイムアウト・ステートレス性がアプリの処理時間と両立するか」は**成立**。
 
-- 合否基準 1（処理時間がタイムアウトに対して十分な余裕を持つ）: この環境では 50MB の `POST /update` が 0.7 秒（§7）。実機の数値は §8
-- 合否基準 2（インスタンス入れ替え後も操作が継続できる）: `/tmp` に置く状態は WIF のキャッシュとロックファイルだけで、消えても作り直される（§5）。実機確認は §8
-- 合否基準 3（二重送信時の方針が決まり、動作確認済み）: **アプリ側で read-modify-write 全体を `flock` で直列化する**（`Updater`）。`concurrency` は 80 のまま（§6）。この環境で 5 本同時に投げて counter がちょうど +5
+- 合否基準 1（処理時間がタイムアウトに対して十分な余裕を持つ）: 実機の `POST /update` は **1MB 0.45 秒 / 10MB 0.86 秒 / 50MB 2.8 秒**（read + write + S3 PUT）。タイムアウト設定値 300 秒（上限 3600 秒）に対して 50MB でも 1/100。現行の上限 1MB なら 0.5 秒
+- 合否基準 2（インスタンス入れ替え後も操作が継続できる）: `/tmp` に置く状態は WIF のキャッシュとロックファイルだけ（§5）。実機で新リビジョン・新インスタンスに切り替えた直後に `GET /` が最新の JSON を返し、`POST /update` が 303（WIF を取り直して S3 PUT まで成功）
+- 合否基準 3（二重送信時の方針が決まり、動作確認済み）: **アプリ側で read-modify-write 全体を `flock` で直列化する**（`Updater`）。`concurrency` は 80 のまま（§6）。実機で 5 本同時に投げて全部 303、約 0.29 秒間隔で順に完了し、counter がちょうど +5
+- 注意点: 新リビジョン直後の初回 `POST /update` は WIF の初回取得と初回接続で **+約 1 秒**（1MB で 1.7 秒）。大きなオブジェクトを小さく書き戻すときも既存オブジェクトのダウンロードが要る（50MB → 208 バイトの書き戻しに 0.66 秒）。どちらもタイムアウトには影響しない
+- S3 転送（GCP asia-northeast1 → S3 ap-northeast-1）: 1MB 0.16〜0.19 秒（レイテンシ支配）、10MB 0.26〜0.36 秒、50MB 0.9〜1.0 秒 ≒ **51〜56 MB/s**（#11 の入力）
 
 ## 2. 検証方法
 
@@ -70,7 +72,7 @@ terraform -chdir=terraform/gcp apply          # FS_CHECK を空に戻し、FS_CH
 | PHP `max_execution_time` | 30 秒（`php.ini` を置いていないので組み込み既定） | Linux では**スクリプトの CPU 時間**だけを数え、gcsfuse や S3 の I/O 待ちは含まない。50MB の `json_encode` / `json_decode` でも 1 秒未満 |
 | Apache `Timeout` | 60 秒（既定） | クライアントとの送受信の無通信時間。処理時間の上限ではない |
 | `POST /update` の実測（この環境、50MB） | 0.7 秒 | §7 |
-| `POST /update` の実測（実機、50MB） | （記入） | §8 |
+| `POST /update` の実測（実機） | **1MB 0.45 秒 / 10MB 0.86 秒 / 50MB 2.8 秒**（新リビジョン直後の初回は +約 1 秒） | §8。300 秒に対して 50MB でも 1/100 |
 
 ## 5. ステートレス性の棚卸し
 
@@ -127,19 +129,25 @@ B の結果は「2 回目も順に適用される」（counter は 2 回分進�
 
 ## 8. 実機での確認結果
 
-（ユーザーの手元で §3 を実施して記入する）
+2026-09-18（JST）、Dev Container から §3 を実施。リビジョン `poc-app-00012`（`bench` / `double-submit`）→ `00013`（`restart-verify` 以降）。結果の全文は PR #19 のコメント。
 
 | 確認 | 結果 | 備考 |
 |---|---|---|
-| `/health`（基準） | （記入） | |
-| `bench` 1MB × 3 | （記入） | read / write / put |
-| `bench` 10MB × 3 | （記入） | |
-| `bench` 50MB × 3 | （記入） | `memory_limit` 128M で通るか |
-| S3 転送（put の MB/s、GCP asia-northeast1 → S3 ap-northeast-1） | （記入） | #11 の入力 |
-| `double-submit` 5 本 | （記入） | counter +5、ログの `lock` |
-| インスタンス入れ替え後の `smoke.sh` | （記入） | `wif: credentials refreshed` |
+| `/health`（基準） | 158 / 72 / 69 ms | 初回は接続確立込み。ウォームで約 70ms |
+| `bench` 1MB × 3 | total **1723 / 500 / 445 ms**。read 47.2 / 6.0 / 2.9、write 249.8 / 235.5 / 210.3、put 548.5 / 194.4 / 157.5 ms | 1 回目は新リビジョン直後。put に WIF 初回取得（STS）が入り、total にも約 0.9 秒の未計上分（初回接続・プロセス起動と推定）。2 回目以降は 0.45〜0.5 秒 |
+| `bench` 10MB × 3 | total 919 / 762 / 862 ms。read 60.7 / 23.2 / 25.9、write 415.3 / 410.5 / 422.4、put 360.6 / 263.2 / 344.0 ms | S3 27.7〜38.0 MB/s |
+| `bench` 50MB × 3 | total **2450 / 2701 / 2777 ms**。read 154.9 / 159.4 / 125.5、write 1333.1 / 1540.3 / 1620.8、put 899.3 / 914.7 / 973.5 ms | S3 51.4〜55.6 MB/s。`memory_limit` 128M で通った（ストリーム PUT） |
+| `pad 0`（50MB → 208 バイト） | write 656.9ms | 小さく書き戻すだけでも既存の 50MB オブジェクトのダウンロードが要る（gcsfuse の staged write。docs/01 §4） |
+| S3 転送（GCP asia-northeast1 → S3 ap-northeast-1） | 1MB 0.16〜0.19 秒、10MB 0.26〜0.36 秒、50MB 0.90〜0.97 秒 ≒ 51〜56 MB/s | #11 の入力。1MB はレイテンシ支配（約 150ms） |
+| `double-submit` 5 本 | 全部 303。total 363 / 664 / 952 / 1215 / 1505 ms（約 290ms 間隔で順に完了）、read 0.4〜0.7 / write 168〜187 / put 93〜128 ms。counter 16 → 21 | 直列化されている（各リクエストの処理 = write 0.18 秒 + put 0.1 秒 ≒ 0.29 秒 = 完了間隔）。ログの `lock=` は未取得だが total の階段で確認できる |
+| インスタンス入れ替え | mark: counter 22 / fs-check 1789686928 / instance `1f7cc46a` / rev 00012 → verify: instance `c2c29c16` / rev 00013、`instance_changed: true`、`fresh: true` | 新インスタンスで最新の JSON を読めた |
+| 入れ替え後の `smoke.sh`（Cloud Run 向け） | `/health` 200、`GET /` 200、`POST /update` **303**、更新値の表示 PASS。**S3 の確認だけ FAIL**（つまずいた点 1） | `POST /update` が 303 = 新インスタンスで WIF を取り直して S3 PUT まで成功している（ログの `wif: credentials refreshed` は未取得。任意） |
+
+### つまずいた点 1: Cloud Run に向けた `smoke.sh` の S3 確認が FAIL（2026-09-18）
+
+`FAIL: s3://<bucket>/data.json の内容が一致しない` と出たが、アプリ側は `POST /update` が 303 で S3 PUT まで成功している。原因は Dev Container 側の `aws` CLI の認証: `.env` の moto 用 `AWS_ACCESS_KEY_ID=test` が環境変数に残っている、または `AWS_PROFILE` 未設定 / SSO トークン切れで `aws s3 cp` 自体が失敗し、`2>/dev/null` でエラーが捨てられて「一致しない」と表示された。対処: `unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; export AWS_PROFILE=<profile>`（必要なら `aws sso login --use-device-code --profile <profile>`）してから再実行。`smoke.sh` は取得失敗と内容不一致を区別して表示するように直した（取得失敗ならエラーの 1 行目と確認コマンドを出す）。
 
 ## 9. #9 / #11 への引き継ぎ
 
-- **#9（コールドスタート）**: `bench` の `/health` の応答時間が「ウォームな 1 リクエスト」の基準。新インスタンスの初回は WIF の取り直し（約 1 秒）と gcsfuse の初回 read（40ms）が加わる
-- **#11（コスト）**: S3 転送のレイテンシと MB/s（§8）。GCP → AWS の下り転送量は JSON サイズ × 更新回数
+- **#9（コールドスタート）**: ウォームな `/health` は約 70ms（初回接続込みで 160ms）が基準。新リビジョン直後の初回 `POST /update` は 1MB で 1.7 秒（2 回目以降 0.45 秒）で、差の約 1.2 秒が WIF の初回取得 + 初回接続 + gcsfuse の初回 read。コンテナ起動そのものの時間（startup probe まで）は #9 で測る
+- **#11（コスト）**: S3 転送は 1MB 0.16〜0.19 秒、50MB 0.9〜1.0 秒 ≒ 55 MB/s。GCP → AWS の下り転送量 = JSON サイズ × 更新回数（1MB 未満 × 少数回なら無視できる）
