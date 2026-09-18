@@ -24,7 +24,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | 項目 | 選定 |
 |---|---|
 | コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer / gcloud CLI 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
-| 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1` |
+| 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1`。#8 の実測: `POST /update` は 1MB 0.45 秒 / 50MB 2.8 秒（タイムアウト 300 秒）、新リビジョン直後の初回は +約 1 秒。二重送信は `Updater` の `flock` で直列化済み、インスタンス入れ替え後も継続できる（`docs/06`） |
 | 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す。#7 の実測: 書き込みは 1 回 0.1〜0.2 秒（全体再アップロード）、読み込み 40ms（同一インスタンスで読み直すと 1ms）、`flock` は同一インスタンス内で直列化される、アプリ以外で書き換えたオブジェクトは最大 60 秒古い内容が見える（`docs/05`） |
 | IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割。state は GCS の remote backend（バケット `<PROJECT_ID>-tfstate` を prefix `gcp` / `aws` で共有。ロック内蔵）。init は `scripts/tf-init.sh gcp\|aws` |
 | S3 認証（主案） | Workload Identity Federation の逆方向。AWS IAM ロールの信頼ポリシーに `accounts.google.com` の Web Identity を設定し、条件キー（`sub` / `aud` = SA の一意 ID、`oaud` = ロール ARN）で Cloud Run のサービスアカウントに限定。PHP 側（`app/src/GoogleWebIdentityCredentialProvider.php`）はメタデータサーバーから ID トークンを取得し STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得て `/tmp` にキャッシュする。**鍵レス**（#6 で実装。`docs/04`） |
