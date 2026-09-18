@@ -56,10 +56,15 @@ fi
 if [[ -n "$S3_BUCKET" ]] && command -v aws >/dev/null 2>&1; then
   endpoint_opt=()
   [[ -n "$S3_ENDPOINT" ]] && endpoint_opt=(--endpoint-url "$S3_ENDPOINT")
-  if aws "${endpoint_opt[@]}" s3 cp "s3://$S3_BUCKET/$S3_KEY_PREFIX$DATA_FILE" - 2>/dev/null | grep -q "\"$key\": \"$value\""; then
-    pass "s3://$S3_BUCKET/$S3_KEY_PREFIX$DATA_FILE に同じ内容がある"
+  # 取得の失敗（aws CLI の認証など）と内容の不一致は区別して表示する
+  if s3_body=$(aws "${endpoint_opt[@]}" s3 cp "s3://$S3_BUCKET/$S3_KEY_PREFIX$DATA_FILE" - 2>&1); then
+    if grep -q "\"$key\": \"$value\"" <<<"$s3_body"; then
+      pass "s3://$S3_BUCKET/$S3_KEY_PREFIX$DATA_FILE に同じ内容がある"
+    else
+      ng "s3://$S3_BUCKET/$S3_KEY_PREFIX$DATA_FILE の内容が一致しない"
+    fi
   else
-    ng "s3://$S3_BUCKET/$S3_KEY_PREFIX$DATA_FILE の内容が一致しない"
+    ng "s3://$S3_BUCKET/$S3_KEY_PREFIX$DATA_FILE を取得できない（aws CLI の認証を確認: unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; export AWS_PROFILE=<profile>; aws sso login）: $(head -n1 <<<"$s3_body")"
   fi
 fi
 

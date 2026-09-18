@@ -24,3 +24,6 @@ crash.log
 # 認証情報
 *.pem
 *-key.json
+
+# scripts/update-bench.sh の結果（docs/06 に転記する）
+/update-bench-results.jsonl

@@ -56,7 +56,7 @@ $h = static fn (mixed $v): string => htmlspecialchars((string) $v, ENT_QUOTES, '
   </table>
 
   <h2>更新</h2>
-  <form method="post" action="/update">
+  <form method="post" action="/update" onsubmit="this.querySelector('button').disabled = true">
     <label for="key">key</label>
     <input id="key" name="key" required pattern="[A-Za-z0-9_.\-]{1,64}" placeholder="例: message">
     <label for="value">value</label>

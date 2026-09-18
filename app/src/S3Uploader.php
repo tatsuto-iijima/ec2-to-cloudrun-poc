@@ -44,16 +44,24 @@ final class S3Uploader
     }
 
     /**
-     * JSON 文字列を S3 に PUT し、ETag を返す。
+     * JSON を S3 に PUT し、ETag を返す。
+     *
+     * @param string|resource $body JSON 文字列、または読み取り用のストリーム（大きな JSON をメモリに載せずに送る）
+     * @param int|null        $contentLength ストリームのときはサイズを渡す（SDK がチャンク送信に切り替えないように）
      */
-    public function put(string $json): string
+    public function put(mixed $body, ?int $contentLength = null): string
     {
-        $result = $this->client->putObject([
+        $args = [
             'Bucket' => $this->config->s3Bucket,
             'Key' => $this->config->s3Key(),
-            'Body' => $json,
+            'Body' => $body,
             'ContentType' => 'application/json; charset=utf-8',
-        ]);
+        ];
+        if ($contentLength !== null) {
+            $args['ContentLength'] = $contentLength;
+        }
+
+        $result = $this->client->putObject($args);
 
         return (string) ($result['ETag'] ?? '');
     }

@@ -219,6 +219,38 @@ terraform -chdir=terraform/gcp apply
 - 代替: 元の環境の `terraform/gcp/terraform.tfstate` をコピーして持ってくれば import は不要
 - 今後: → **PR #17 で GCS の remote backend に切り替えた**（`terraform/gcp` / `terraform/aws` とも。バケット `<PROJECT_ID>-tfstate`）。`terraform init` の代わりに `scripts/tf-init.sh gcp|aws` を使う。ローカルに state が残っている環境では `-migrate-state` で GCS に移行され、以後はどの環境からも同じ state を見る（`gcs` backend はロックを内蔵しているので同時 apply も防げる）
 
+### つまずいた点 8: 時間が経つと Terraform が `invalid_grant (invalid_rapt)`、gcloud が `Reauthentication required` になる（2026-09-17）
+
+```
+Error: Failed to load state: Failed to open state file at gs://<PROJECT_ID>-tfstate/gcp/default.tfstate:
+  ... auth: "invalid_grant" "reauth related error (invalid_rapt)" "https://support.google.com/a/answer/9368756"
+```
+
+```
+$ scripts/build-push.sh
+Reauthentication required.
+Please enter your password:
+```
+
+原因: 組織配下の Google アカウントには再認証ポリシー（セッション制御）が効いていて、期限を過ぎると資格情報のリフレッシュが拒否される。Dev Container には**資格情報が 2 種類**あり、別々に切れる。
+
+| 資格情報 | 作るコマンド | 使うもの | 切れたときの症状 |
+|---|---|---|---|
+| gcloud 用 | `gcloud auth login` | `gcloud` コマンド（`builds submit`、`run`、`storage`、`auth print-identity-token`） | `Reauthentication required. Please enter your password:` とターミナルで聞かれる（gcloud 自身の正規の再認証フロー。2 段階認証があればその入力も続く） |
+| ADC（Application Default Credentials） | `gcloud auth application-default login` | Terraform（`gcs` backend と google provider）、クライアントライブラリ | `invalid_grant` / `invalid_rapt`（再認証の証明が無効） |
+
+PR #17 で `~/.config/gcloud` を名前付きボリュームにしたため、Dev Container を Rebuild しても古い資格情報が残り、期間が空くと両方出る。コードや Terraform の問題ではない。
+
+対処: 2 つとも取り直す。パスワードのプロンプトは Ctrl-C で抜けてよい（ターミナルにパスワードを打たず、ホストのブラウザで認証する）。
+
+```bash
+gcloud auth login --no-launch-browser                        # gcloud 用（URL をホストのブラウザで開き、コードを貼る）
+gcloud auth application-default login --no-launch-browser    # ADC（Terraform 用）
+scripts/build-push.sh && terraform -chdir=terraform/gcp apply   # 途中だった手順の続きをそのまま実行できる
+```
+
+`terraform/aws` も state は GCS なので同じ症状・同じ対処。
+
 ## 6. 実機での確認結果
 
 2026-09-14、Dev Container（macOS / Apple Silicon）から実施。プロジェクトは組織配下の新規プロジェクト（無料トライアル）、リージョン asia-northeast1。
