@@ -247,6 +247,8 @@ export BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url)
 nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &     # IDLE（既定 960 秒）待って初回 TTFB を測り、X-Instance-* でコールド判定。N（既定 5）個集める
 scripts/cold-start.sh report                                   # 構成 × パス × cold/warm の p50 / p95
 scripts/cold-start.sh startup-log                              # gcsfuse マウント → 起動プローブ成功の時刻
+# min_instances>=1 の構成は常駐モード（落ちないのでアイドル後の初回をそのまま採用し、待ちを延ばさない。N=5 で約 80 分）
+# gcloud の認証が切れる（十数時間）と再開手順を出して止まる。gcloud auth login --no-launch-browser の後、同じコマンドで続きから追記される
 # 計測中はサービスに触らない（アイドルが途切れる）。min_instances=1 は課金が発生するので終わったら 0 に戻して apply
 ```
 
