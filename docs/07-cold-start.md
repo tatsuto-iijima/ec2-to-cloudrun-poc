@@ -27,18 +27,26 @@
 
 1 回のコールドスタートで測れる「初回」は 1 つなので、奇数回目は `GET /`（gcsfuse 上の JSON を読む）、偶数回目は `GET /health`（ファイルにも S3 にも触らない）を初回にし、直後にもう一方を「同一インスタンスの 2 回目」として測る。`/`（初回）− `/health`（初回）が gcsfuse 初回アクセス + PHP の JSON 処理の寄与。Issue の `/healthz` は Cloud Run の予約パスで使えないので `/health`（docs/03 つまずいた点 5）。
 
+### `min_instances=1` の構成（常駐モード）
+
+`min_instances=1` ではインスタンスが常に 1 台待機し、アイドルでも落ちないのでコールドスタートは起きない。この構成で測るべきは「アイドル（16 分）後の初回リクエストが、待機中のインスタンスでどれだけ速く返るか」（`cpu_idle=true` なのでアイドル中は CPU が絞られる。その影響が出るか）。そのため構成ラベルが `min1`〜`min9` で始まるときは、成功した試行をそのまま標本として採用し、待ち時間は延ばさない（`report` では `first(アイドル後・常駐)`）。`N=5` で約 80 分。
+
+なお Cloud Run は待機中のインスタンスも裏で入れ替えることがある（構成 3 の計測で 1 回観測。新しいインスタンスは既に 1310 秒稼働していたので、リクエストは起動を待っていない）。
+
 ### `scripts/cold-start.sh`
 
 | サブコマンド | 内容 |
 |---|---|
-| `sample` | `IDLE` 秒待つ → 初回（`/` または `/health`）を計測 → コールド判定 → 直後に 2 回目 → jsonl に追記。コールド標本が `N`（既定 5）個集まるまで繰り返す（コールドでなければ `EXTRA` 秒延ばす）。構成ラベルは `terraform output cold_start_config`（`min0-boost0` 等）。ID トークンは 1 時間で切れるので毎回取り直す |
-| `report` | jsonl を構成 × パス × 種別（`first(cold)` / `second(同一インスタンス)` / `first(warm, 不採用)`）で集計し、n / p50 / p95 / min / max を表示 |
+| `sample` | `IDLE` 秒待つ → 初回（`/` または `/health`）を計測 → コールド判定 → 直後に 2 回目 → jsonl に追記。コールド標本が `N`（既定 5）個集まるまで繰り返す（コールドでなければ `EXTRA` 秒延ばす。上限 `MAX_IDLE`、既定 1800 秒）。構成ラベルは `terraform output cold_start_config`（`min0-boost0` 等）で、`min1` 以上は常駐モード。ID トークンは 1 時間で切れるので毎回取り直す。gcloud の認証が切れたら再開手順を出して終了コード 3 で止まり、同じコマンドで続きから追記できる |
+| `report` | jsonl を構成 × パス × 種別（`first(cold)` / `first(アイドル後・常駐)` / `second(同一インスタンス)` / `first(warm, 不採用)`）で集計し、n / p50 / p95 / min / max を表示。失敗行と不正な行は除外 |
 | `startup-log` | 直近の起動ログ（gcsfuse マウント完了 → Apache 起動 → 起動プローブ成功）を時刻付きで表示。差がコンテナ起動の内訳 |
 | `image-size` | Artifact Registry のレイヤー合計サイズ |
 
 ## 3. 手順（Dev Container 内で実施）
 
-1 標本に `IDLE`（16 分）以上かかるので、`nohup` で流して放置する。4 構成 × `N=5` で約 6 時間、Issue の 10 回にするなら `N=10` で約 11 時間。
+1 標本に `IDLE`（16 分）以上かかるので、`nohup` で流して放置する。min 0 の構成は 1 構成 1.5〜2 時間、min 1 の構成は約 80 分（`N=5`）。Issue の 10 回にするなら `N=10`。
+
+組織アカウントのセッション制御で、gcloud の認証は十数時間で切れる（構成 3 の計測では開始から約 12 時間後に切れた）。切れるとスクリプトは再開手順を出して止まるので、`gcloud auth login --no-launch-browser` の後に同じコマンドを実行すれば続きから追記される。長く放置する前に取り直しておくと確実。
 
 ```bash
 export BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url)
@@ -56,11 +64,11 @@ nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &
 
 # 構成 3: min 1 / boost あり（常時 1 台。課金が発生するので計測が終わったら戻す）
 echo 'min_instances = 1' >> terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply
-nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &     # min 1 ではコールドにならず「warm（採用しない）」が続く。その TTFB が「アイドル後の初回」なので MAX_TRIES=5 で打ち切ってよい
+nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &     # 常駐モード（アイドル後の初回をそのまま採用）。約 80 分
 
 # 構成 4: min 1 / boost なし
 sed -i '/^startup_cpu_boost/d' terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply
-MAX_TRIES=5 nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &
+nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &
 
 # 集計・付随情報
 scripts/cold-start.sh report
@@ -71,7 +79,7 @@ scripts/cold-start.sh image-size
 sed -i '/^min_instances\|^startup_cpu_boost/d' terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply
 ```
 
-- `min_instances=1` の構成ではインスタンスが落ちないので `sample` は全部「warm（採用しない）」になる。`report` の `first(warm, 不採用)` 行がその構成の「アイドル後の初回」（`cpu_idle=true` なのでアイドル中は CPU が絞られる。その影響が出るか見る）
+- `min_instances=1` の構成は常駐モード（§2）。`report` の `first(アイドル後・常駐)` 行がその構成の「アイドル後の初回」
 - 計測中は他の操作（ブラウザで開く、`smoke.sh` など）をしない。アイドルが途切れる
 
 ## 4. 合否基準と結果
@@ -139,6 +147,24 @@ curl: (6) Could not resolve host: <ID トークン>
 - `report` は失敗行と不正な行を集計から除き、件数を表示する
 - 検証に `TOKEN=dummy`（localhost はヘッダーを無視する）を加え、修正前のコードで同じエラーが再現し、修正後は出ないことを確認した
 
+### つまずいた点 2: `min_instances=1` で待ち時間が延び続け、約 12 時間後に gcloud の認証が切れた（2026-09-27）
+
+構成 3（min 1 / boost あり）で `sample` を流したところ、15 回目の直前に次のエラーで止まった。
+
+```
+ERROR: (gcloud.auth.print-identity-token) There was a problem refreshing your current auth tokens:
+  Reauthentication failed. cannot prompt during non-interactive execution.
+```
+
+原因はスクリプトの設計。`min_instances=1` ではインスタンスが落ちないので、全試行が「warm（採用しない）」になり、コールド標本を待って待ち時間を 300 秒ずつ延ばし続けた（960 秒 → 5160 秒）。15 回で約 12 時間かかり、その間に組織のセッション制御で gcloud の認証が切れた。採用されないので初回パスも毎回 `/` のままだった。さらに認証の取り直しが `probe`（プロセス置換のサブシェル）の中にあったため、gcloud のメッセージだけ出て、理由を言わずに終了していた。
+
+対処:
+
+- `min_instances≥1` の構成は常駐モードにした（§2）。成功した試行をそのまま採用し、待ち時間は延ばさない。初回パスは標本ごとに `/` と `/health` を交互にする
+- min 0 の構成でも、待ち時間の延長に上限（`MAX_IDLE`、既定 1800 秒）を付けた
+- 認証の取り直しをメインのシェルで行い、失敗したら再開手順を出して終了コード 3 で止める
+- `report` はラベルが `min1` 以上の初回を `first(アイドル後・常駐)` に集計する。修正前の形式で記録された構成 3 の 14 件もそのまま集計に使える
+
 ## 8. 実機での確認結果
 
 （ユーザーの手元で §3 を実施して記入する）
@@ -147,7 +173,7 @@ curl: (6) Could not resolve host: <ID トークン>
 |---|---|---|
 | min 0 / boost なし | （記入） | （記入） |
 | min 0 / boost あり | （記入） | （記入） |
-| min 1 / boost あり | （記入） | |
+| min 1 / boost あり | 中間結果（修正前のスクリプト、2026-09-27）: アイドル 16〜86 分後の初回 `GET /` が 14 件。TTFB 140〜1176ms（昇順 140, 149, 151, 151, 155, 168, 180, 182, 187, 193, 211, 260, 261, 1176）、**p50 180ms / p95 1176ms**（14 件なので p95 は最大値。1176ms は 1 回だけの外れ値）。`/health` を初回にした標本は無い。途中で Cloud Run が待機インスタンスを裏で入れ替えた（`a50f150a` → `b331db56`、入れ替え後のインスタンスは既に 1310 秒稼働）。最終値は `report` で確定 | 起動は計測対象外（コールドスタートが起きない） |
 | min 1 / boost なし | （記入） | |
 
 ## 9. #10 / #11 への引き継ぎ
