@@ -42,11 +42,12 @@
 
 ```bash
 export BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url)
+rm -f cold-start-results.jsonl        # 修正前の cold-start.sh が書いた失敗行があれば消す（つまずいた点 1）
 
 # 構成 1: min 0 / boost なし（既定）。tfvars に何も書かなければこの構成
 sed -i '/^min_instances\|^startup_cpu_boost/d' terraform/gcp/terraform.tfvars
 terraform -chdir=terraform/gcp apply
-nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &     # 進捗は tail -f cold-start.log
+nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &     # 進捗は tail -f cold-start.log。最初に「現在のインスタンス: xxxxxxxx」が出れば認証は通っている
 #   ... 終わるのを待つ（cold-start.log の末尾に「コールド標本 N 個」が出る）
 
 # 構成 2: min 0 / boost あり
@@ -118,6 +119,25 @@ GiB 秒  = 0.5 GiB × 2,592,000 = 1,296,000 GiB 秒
 | `/health` と `/` の応答ヘッダー | `X-Instance-Id: 7face1f5`、`X-Instance-Uptime: 0` → 2 秒後 `2` |
 | `sample`（`/tmp/instance-id` を消してコールドを模擬、`IDLE=3 N=3`） | 3 回とも `COLD`（ID が変わり uptime 0）。奇数回目 `/`、偶数回目 `/health` が初回になり、2 回目も記録される |
 | `report` | label × path × 種別ごとに n / p50 / p95 / min / max が出る |
+
+### つまずいた点 1: `cold-start.sh` が `curl: (6) Could not resolve host: Bearer` で失敗する（2026-09-27）
+
+実機の構成 1 で `sample` を始めたところ、次のエラーが出て計測にならなかった。
+
+```
+curl: (6) Could not resolve host: Bearer
+curl: (6) Could not resolve host: <ID トークン>
+```
+
+原因: スクリプトのバグ。認証ヘッダーを関数から `echo` で文字列として返し、`curl $(auth_args) ...` と引用符なしで展開していたため、`Authorization: Bearer <token>` が空白で割れて `Bearer` と `<token>` が別の引数になり、curl がそれらを URL（ホスト名）として解釈した。`fs-check.sh` / `update-bench.sh` / `smoke.sh` はヘッダーを配列で渡しているので起きない。この環境の検証は localhost に対してトークン無しで行ったので、この経路を通っていなかった。
+
+対処:
+
+- 認証ヘッダーを配列（`auth=(-H "Authorization: Bearer $t")`）で渡す。IDLE の間にトークンが切れるので、リクエストのたびに取り直す
+- curl が失敗した試行は `"ok":false`、`"code":0` の有効な JSON として記録し、採用しない。修正前は `"code":000`（先頭ゼロ）という不正な JSON が書かれていた
+- 開始時の `GET /health` が 200 でない、または `X-Instance-Id` が無ければ、原因の候補（BASE_URL・認証・古いイメージ）を出して中断する
+- `report` は失敗行と不正な行を集計から除き、件数を表示する
+- 検証に `TOKEN=dummy`（localhost はヘッダーを無視する）を加え、修正前のコードで同じエラーが再現し、修正後は出ないことを確認した
 
 ## 8. 実機での確認結果
 
