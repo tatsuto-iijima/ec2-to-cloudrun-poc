@@ -33,24 +33,33 @@ cmd="${1:-report}"
 
 cd "$(dirname "$0")/.."
 
-# ID トークンを（必要なら取り直して）返す。IDLE が長いので毎回取り直す
-auth_args() {
+# 認証ヘッダー。ヘッダーは空白を含むので必ず配列で curl に渡す（文字列にして展開すると
+# "Bearer" とトークンが別の引数に割れ、curl がホスト名として解釈する。docs/07 つまずいた点 1）。
+# IDLE（16 分）の間に ID トークン（1 時間）が切れうるので、リクエストのたびに取り直す
+auth=()
+refresh_auth() {
+  auth=()
   local t="$TOKEN"
   if [[ -z "$t" && "$BASE_URL" == *.run.app* ]]; then t=$(gcloud auth print-identity-token); fi
-  [[ -n "$t" ]] && echo "-H" "Authorization: Bearer $t"
+  if [[ -n "$t" ]]; then auth=(-H "Authorization: Bearer $t"); fi
 }
 
-# 1 リクエストを測り、"code<TAB>ttfb_ms<TAB>total_ms<TAB>instance<TAB>uptime" を返す
+# 1 リクエストを測り、"code<TAB>ttfb_ms<TAB>total_ms<TAB>instance<TAB>uptime" を返す。
+# curl が失敗したら code=0（stderr に 1 行）。instance / uptime はヘッダーが無ければ空
 probe() { # probe <path>
   local hdr out code ttfb total inst up
+  refresh_auth
   hdr=$(mktemp)
-  # shellcheck disable=SC2046
-  out=$(curl -sS $(auth_args) -o /dev/null -D "$hdr" -w '%{http_code}\t%{time_starttransfer}\t%{time_total}' "$BASE_URL$1")
+  if ! out=$(curl -sS "${auth[@]}" -o /dev/null -D "$hdr" -w '%{http_code}\t%{time_starttransfer}\t%{time_total}' "$BASE_URL$1"); then
+    echo "$(date -u +%FT%TZ) curl が失敗: $BASE_URL$1" >&2
+    out=$'0\t0\t0'
+  fi
   IFS=$'\t' read -r code ttfb total <<<"$out"
-  inst=$(grep -i '^x-instance-id:' "$hdr" | tr -d '\r' | awk '{print $2}')
-  up=$(grep -i '^x-instance-uptime:' "$hdr" | tr -d '\r' | awk '{print $2}')
+  inst=$(grep -i '^x-instance-id:' "$hdr" | tr -d '\r' | awk '{print $2}' || true)
+  up=$(grep -i '^x-instance-uptime:' "$hdr" | tr -d '\r' | awk '{print $2}' || true)
   rm -f "$hdr"
-  printf '%s\t%.0f\t%.0f\t%s\t%s\n' "$code" "$(php -r 'echo $argv[1]*1000;' "$ttfb")" "$(php -r 'echo $argv[1]*1000;' "$total")" "${inst:-}" "${up:-}"
+  # code は "000" のような先頭ゼロを数値に直す（JSON に書くため）
+  printf '%d\t%.0f\t%.0f\t%s\t%s\n' "$((10#${code:-0}))" "$(php -r 'echo (float) $argv[1] * 1000;' "${ttfb:-0}")" "$(php -r 'echo (float) $argv[1] * 1000;' "${total:-0}")" "${inst:-}" "${up:-}"
 }
 
 record() { # record <json>
@@ -64,8 +73,13 @@ sample() {
   # 前回の計測で最後に見たインスタンス ID（あれば）。無ければ 1 回だけ /health で取得する（これで idle タイマーが動き出す）
   prev=$(grep -h "\"label\":\"$LABEL\"" "$OUT" 2>/dev/null | tail -1 | php -r '$d=json_decode(stream_get_contents(STDIN),true); echo $d["instance"]??"";' || true)
   if [[ -z "$prev" ]]; then
-    IFS=$'\t' read -r _ _ _ prev _ < <(probe /health)
-    echo "$(date -u +%FT%TZ) 現在のインスタンス: ${prev:-?}（ここからアイドルを数える）"
+    local c0
+    IFS=$'\t' read -r c0 _ _ prev _ < <(probe /health)
+    if [[ "$c0" != 200 || -z "$prev" ]]; then
+      echo "GET /health が $c0 でした（X-Instance-Id: ${prev:-なし}）。BASE_URL・認証（gcloud auth login）・デプロイ済みのイメージ（X-Instance-* を返す版か）を確認してください" >&2
+      exit 1
+    fi
+    echo "$(date -u +%FT%TZ) 現在のインスタンス: $prev（ここからアイドルを数える）"
   fi
   while (( collected < N && tries < MAX_TRIES )); do
     tries=$((tries + 1))
@@ -73,13 +87,19 @@ sample() {
     sleep "$wait"
     i=$((collected + 1))
     if (( i % 2 == 1 )); then first=/; second=/health; else first=/health; second=/; fi
-    local c1 t1 tot1 inst1 up1 c2 t2 tot2 inst2 up2 cold ts
+    local c1 t1 tot1 inst1 up1 c2 t2 tot2 inst2 up2 cold ok ts
     ts=$(date -u +%FT%TZ)
     IFS=$'\t' read -r c1 t1 tot1 inst1 up1 < <(probe "$first")
     IFS=$'\t' read -r c2 t2 tot2 inst2 up2 < <(probe "$second")
-    if [[ -n "$inst1" && "$inst1" != "$prev" && -n "$up1" && "$up1" -le "$COLD_MAX_UPTIME" ]]; then cold=true; else cold=false; fi
-    record "{\"ts\":\"$ts\",\"label\":\"$LABEL\",\"try\":$tries,\"order\":\"first\",\"path\":\"$first\",\"code\":$c1,\"ttfb_ms\":$t1,\"total_ms\":$tot1,\"instance\":\"$inst1\",\"uptime\":${up1:-null},\"prev\":\"$prev\",\"cold\":$cold,\"idle_s\":$wait}"
-    record "{\"ts\":\"$ts\",\"label\":\"$LABEL\",\"try\":$tries,\"order\":\"second\",\"path\":\"$second\",\"code\":$c2,\"ttfb_ms\":$t2,\"total_ms\":$tot2,\"instance\":\"$inst2\",\"uptime\":${up2:-null},\"prev\":\"$prev\",\"cold\":false,\"idle_s\":$wait}"
+    if [[ "$c1" == 200 && "$c2" == 200 && -n "$inst1" ]]; then ok=true; else ok=false; fi
+    if [[ "$ok" == true && "$inst1" != "$prev" && -n "$up1" && "$up1" -le "$COLD_MAX_UPTIME" ]]; then cold=true; else cold=false; fi
+    record "{\"ts\":\"$ts\",\"label\":\"$LABEL\",\"try\":$tries,\"order\":\"first\",\"path\":\"$first\",\"ok\":$ok,\"code\":$c1,\"ttfb_ms\":$t1,\"total_ms\":$tot1,\"instance\":\"$inst1\",\"uptime\":${up1:-null},\"prev\":\"$prev\",\"cold\":$cold,\"idle_s\":$wait}"
+    record "{\"ts\":\"$ts\",\"label\":\"$LABEL\",\"try\":$tries,\"order\":\"second\",\"path\":\"$second\",\"ok\":$ok,\"code\":$c2,\"ttfb_ms\":$t2,\"total_ms\":$tot2,\"instance\":\"$inst2\",\"uptime\":${up2:-null},\"prev\":\"$prev\",\"cold\":false,\"idle_s\":$wait}"
+    if [[ "$ok" != true ]]; then
+      # 失敗した試行は採用しない。インスタンスが分からないので prev も更新しない
+      echo "$ts   失敗（採用しない）: $first -> HTTP $c1 / $second -> HTTP $c2。次も ${wait}s 待つ"
+      continue
+    fi
     if [[ "$cold" == true ]]; then
       collected=$((collected + 1)); wait="$IDLE"
       echo "$ts   COLD #$collected: $first ttfb=${t1}ms total=${tot1}ms (instance $prev -> $inst1, uptime ${up1}s) / 2 回目 $second ttfb=${t2}ms"
@@ -95,7 +115,10 @@ sample() {
 report() {
   [[ -f "$OUT" ]] || { echo "$OUT がありません" >&2; exit 1; }
   php -r '
-    $rows = array_values(array_filter(array_map(fn($l) => json_decode($l, true), file($argv[1], FILE_IGNORE_NEW_LINES)), fn($r) => is_array($r) && isset($r["ttfb_ms"])));
+    $all = array_map(fn($l) => json_decode($l, true), file($argv[1], FILE_IGNORE_NEW_LINES));
+    // 壊れた行（修正前の版が書いた "code":000 など）と、失敗した試行（HTTP 200 以外）は集計しない
+    $rows = array_values(array_filter($all, fn($r) => is_array($r) && isset($r["ttfb_ms"]) && ($r["ok"] ?? true) !== false && (int) ($r["code"] ?? 0) === 200));
+    $skipped = count($all) - count($rows);
     $g = [];
     foreach ($rows as $r) {
       if ($r["order"] === "first" && !$r["cold"]) { $k = [$r["label"], $r["path"], "first(warm, 不採用)"]; }
@@ -111,6 +134,7 @@ report() {
       printf("%-14s %-8s %-26s %3d %7.0f %7.0f %7.0f %7.0f\n", $label, $path, $kind, count($v), $pct($v, 50), $pct($v, 95), min($v), max($v));
     }
     echo "（ms。first(cold) が「アイドル後の初回」。p95 は昇順 ceil(0.95n) 番目）\n";
+    if ($skipped > 0) { echo "失敗・不正な行 {$skipped} 件は集計から除外\n"; }
   ' "$OUT"
 }
 
