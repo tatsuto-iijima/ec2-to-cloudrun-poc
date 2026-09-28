@@ -5,10 +5,13 @@
 
 ## 1. 結論
 
-（実機の結果を反映してから確定する。§8 に記入）
+**4 構成とも許容レスポンスタイム（仮: アイドル後の初回の p95 < 3 秒）を満たす**（実機 2026-09-27〜28、§4 / §8）。許容値は Issue #9 の例をそのまま仮置きしており、ユーザーの確認を待っている。
 
-- 許容レスポンスタイム（仮）: **アイドル後の初回リクエストの p95 < 3 秒**（Issue #9 の例。ユーザーと合意して確定する）
-- 4 構成（`min-instances` 0 / 1 × startup CPU boost あり / なし）の p50 / p95 と、許容値を満たす構成とそのコストは §4 / §6
+- **推奨は現行既定の min 0 / boost なし**。追加コストは 0 で、アイドル後の初回（コールドスタート）は `GET /` で p50 2.32 秒 / p95 2.35 秒。許容値との差は約 0.6 秒
+- 初回を 0.2 秒台にしたい場合だけ **min 1**（アイドル後の初回 `GET /` p50 0.18 秒）。待機インスタンス 1 台分の課金が増える（概算 約 $10 / 月、要確認。#11 で確定。§6）
+- **startup CPU boost は効果なし**（p50 の差は 3〜10ms で誤差の範囲）。付ける理由が無い
+- **gcsfuse はコールドスタートを特に遅くしていない**。コールドの `/`（JSON 読み込みあり）と `/health`（読み込みなし）の差は約 0.13 秒で、ウォームなインスタンスでの差と同程度（初回の JSON 読み込みぶんだけ）
+- **コールドスタートの本体は約 2.1 秒**（コールドの `/health` 2.19 秒 − ウォームの `/health` 0.06 秒）。起動プローブの間隔 2 秒がこの待ちの大半を占めている可能性があり、間隔を 1 秒にすると約 1 秒縮む見込み（仮説。任意の追加計測。§5）
 
 ## 2. 検証方法
 
@@ -88,20 +91,51 @@ sed -i '/^min_instances\|^startup_cpu_boost/d' terraform/gcp/terraform.tfvars &&
 
 | 構成 | `/` 初回 p50 / p95 | `/health` 初回 p50 / p95 | 2 回目（同一インスタンス）`/` / `/health` | 許容値 | 月額の増分 |
 |---|---|---|---|---|---|
-| min 0 / boost なし（現行既定） | （記入） | （記入） | （記入） | （記入） | 0 |
-| min 0 / boost あり | （記入） | （記入） | （記入） | （記入） | 0（起動中の CPU 分のみ） |
-| min 1 / boost あり | （記入） | （記入） | （記入） | （記入） | §6 |
-| min 1 / boost なし | （記入） | （記入） | （記入） | （記入） | §6 |
+| min 0 / boost なし（現行既定・**推奨**） | **2324 / 2347**（n=3、コールド） | 2189 / 2194（n=2、コールド） | 190 / 57 | 満たす | 0 |
+| min 0 / boost あり | 2327 / 2375（n=3、コールド） | 2199 / 2240（n=2、コールド） | 155 / 55 | 満たす | 0（起動中の CPU 分のみ） |
+| min 1 / boost あり | 180 / 1176（n=14、アイドル後・常駐） | —（標本なし） | — / 56 | 満たす | §6（約 $10 / 月、要確認） |
+| min 1 / boost なし | 183 / 218（n=3、アイドル後・常駐） | 91 / 140（n=2、アイドル後・常駐） | 102 / 53 | 満たす | §6（約 $10 / 月、要確認） |
 
-## 5. 起動時間の内訳（記入欄）
+単位は ms（TTFB）。p95 は昇順 ceil(0.95n) 番目なので、n が 14 以下では最大値と同じ。
 
-`startup-log` の出力から: gcsfuse `File system has been successfully mounted.` → Apache `resuming normal operations` → `STARTUP HTTP probe succeeded` の時刻差。#5 の起動ログ（docs/03 §6）では gcsfuse 3.11.3 のマウント → Apache 2.4.68 / PHP 8.3.33 起動 → プローブ 2 回目で成功だった。
+- **標本数**: min 0 は構成ごとに 5 標本（パスごとに 2〜3）で、Issue の「各 10 回」には届いていない。ただし boost の有無で差が無いので、min 0 の 2 構成を合わせた 10 標本で見ても 2189〜2375ms（幅 0.19 秒）に収まっており、許容値 3 秒に対する結論は変わらない
+- **min 1 / boost ありの 1176ms** は 14 件中 1 回だけの外れ値（他の 13 件は 140〜261ms）。原因は特定していない（アイドル中に CPU が絞られた状態からの復帰の揺らぎと推定）
+- **min 1 の初回と 2 回目の差**（`/` で 183 → 102ms）は、`cpu_idle = true` でアイドル中に CPU が絞られるぶん
+
+## 5. 起動時間の内訳
+
+TTFB から分解すると次のとおり（min 0 / boost なしの p50）。
+
+| 区間 | 時間 | 根拠 |
+|---|---|---|
+| ネットワーク往復 + アプリの処理（`/health`） | 約 0.06 秒 | ウォームの `/health` 57ms |
+| コールドスタートの本体（インスタンス確保 → コンテナ起動 → gcsfuse マウント → Apache 起動 → 起動プローブ成功 → リクエスト転送） | **約 2.1 秒** | コールドの `/health` 2189ms − ウォームの `/health` 57ms |
+| 初回の JSON 読み込み（gcsfuse + PHP） | 約 0.13 秒 | コールドの `/` − `/health` = 135ms。ウォームでも 133ms で同程度 |
+
+- **起動プローブの間隔が効いている可能性**: 起動プローブは `initial_delay 0` / `period 2` で、#5 の起動ログ（docs/03 §6）では「2 回目で成功」だった。1 回目はコンテナ起動直後で Apache がまだ上がっておらず失敗し、2 秒後の 2 回目で成功する = 約 2 秒の待ちの大半がプローブ間隔と考えられる。間隔を 1 秒にすれば約 1 秒縮む見込み（仮説。下の任意の追加計測で確かめる）
+- **gcsfuse のマウントは起動を特に遅くしていない**: マウントは Cloud Run がコンテナ起動前に行う。マウントに時間がかかっていれば `/health` のコールドも遅くなるはずだが、`/` との差は通常の初回読み込みぶんだけだった
+- **イメージサイズ**と、起動ログから見た区間ごとの時刻は、修正後の `startup-log` / `image-size` で取得する（つまずいた点 3。記入欄）
 
 | 項目 | 値 |
 |---|---|
 | イメージサイズ（`image-size`） | （記入） |
-| gcsfuse マウント完了 → プローブ成功 | （記入） |
-| 起動プローブ設定 | `GET /health`、`initial_delay 0` / `period 2` / `timeout 2` / `failure_threshold 15`（docs/03）。period を 1 秒にすれば最大 1 秒縮む余地がある |
+| gcsfuse マウント完了 → Apache 起動 → プローブ成功（`startup-log`） | （記入） |
+| 起動プローブ設定 | `GET /health`、`initial_delay 0` / `period 2` / `timeout 2` / `failure_threshold 15`。`startup_probe_period_seconds` で間隔を変えられる（`failure_threshold` は合計 30 秒を保つよう自動で決まる） |
+
+### 任意の追加計測: 起動プローブの間隔を 1 秒にする
+
+合否は上の 4 構成で確定しているので、これは推奨構成をさらに速くできるかの確認（約 2 時間）。
+
+```bash
+echo 'startup_probe_period_seconds = 1' >> terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply
+nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &     # ラベルは min0-boost0-probe1
+scripts/cold-start.sh report
+sed -i '/^startup_probe_period_seconds/d' terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply   # 戻す（効果があれば既定値を 1 にする）
+```
+
+| 構成 | `/` 初回 p50 / p95 | `/health` 初回 p50 / p95 |
+|---|---|---|
+| min 0 / boost なし / プローブ間隔 1 秒 | （記入） | （記入） |
 
 ## 6. `min-instances=1` の月額概算（#11 の入力）
 
@@ -165,18 +199,44 @@ ERROR: (gcloud.auth.print-identity-token) There was a problem refreshing your cu
 - 認証の取り直しをメインのシェルで行い、失敗したら再開手順を出して終了コード 3 で止める
 - `report` はラベルが `min1` 以上の初回を `first(アイドル後・常駐)` に集計する。修正前の形式で記録された構成 3 の 14 件もそのまま集計に使える
 
+### つまずいた点 3: `startup-log` がシステムログを拾えず、`image-size` が 0.0 MB（2026-09-28）
+
+実機で `startup-log` を実行したところ、Apache の起動行（`resuming normal operations`）しか出ず、gcsfuse のマウント完了と起動プローブ成功の行が無かった。`image-size` は `0.0 MB` と出た。
+
+- `startup-log`: `gcloud run services logs read` はコンテナの stdout/stderr とリクエストログが中心で、gcsfuse とプローブのメッセージが出る Cloud Run のシステムログを含まなかった。→ `gcloud logging read` でサービスの全ログから探すように直した（`FRESHNESS`、`LIMIT` で範囲を変えられる）
+- `image-size`: `gcloud artifacts files list` の `sizeBytes` を合計していたが、値が取れていなかった。→ `gcloud artifacts docker images list <image_uri> --include-tags` の `metadata.imageSizeBytes`（圧縮済みレイヤーの合計 = pull する量）を新しい順に 3 件表示するように直した。値が無ければ `describe` で確認するよう表示する
+- どちらもこの環境では偽の `gcloud` で表示を確認しただけで、本物の gcloud の出力形式は手元で確認する
+
 ## 8. 実機での確認結果
 
-（ユーザーの手元で §3 を実施して記入する）
+2026-09-27〜28、Dev Container から §3 を実施（PHP 8.3.35 のイメージ）。構成 3 は修正前のスクリプトで計測（つまずいた点 2）。`report` の全行は次のとおり（PR #20 のコメント）。
 
-| 構成 | `report` の行 | `startup-log` の要点 |
+```
+label          path     kind                         n     p50     p95     min     max
+min0-boost0    /        first(cold)                  3    2324    2347    2261    2347
+min0-boost0    /        second(同一インスタンス)     2     190     195     190     195
+min0-boost0    /health  first(cold)                  2    2189    2194    2189    2194
+min0-boost0    /health  second(同一インスタンス)     3      57      71      53      71
+min0-boost1    /        first(cold)                  3    2327    2375    2317    2375
+min0-boost1    /        second(同一インスタンス)     2     155     212     155     212
+min0-boost1    /health  first(cold)                  2    2199    2240    2199    2240
+min0-boost1    /health  second(同一インスタンス)     3      55      57      52      57
+min1-boost0    /        first(アイドル後・常駐)      3     183     218     161     218
+min1-boost0    /        second(同一インスタンス)     2     102     117     102     117
+min1-boost0    /health  first(アイドル後・常駐)      2      91     140      91     140
+min1-boost0    /health  second(同一インスタンス)     3      53      56      53      56
+min1-boost1    /        first(アイドル後・常駐)     14     180    1176     140    1176
+min1-boost1    /health  second(同一インスタンス)    14      56      64      50      64
+```
+
+| 構成 | 要点 | `startup-log` の要点 |
 |---|---|---|
-| min 0 / boost なし | （記入） | （記入） |
-| min 0 / boost あり | （記入） | （記入） |
+| min 0 / boost なし | コールド 5 標本。`/` 2261〜2347ms、`/health` 2189〜2194ms | 修正前の `startup-log` では Apache の起動行だけ（つまずいた点 3） |
+| min 0 / boost あり | コールド 5 標本。`/` 2317〜2375ms、`/health` 2199〜2240ms。boost なしと差が無い | 同上 |
 | min 1 / boost あり | 中間結果（修正前のスクリプト、2026-09-27）: アイドル 16〜86 分後の初回 `GET /` が 14 件。TTFB 140〜1176ms（昇順 140, 149, 151, 151, 155, 168, 180, 182, 187, 193, 211, 260, 261, 1176）、**p50 180ms / p95 1176ms**（14 件なので p95 は最大値。1176ms は 1 回だけの外れ値）。`/health` を初回にした標本は無い。途中で Cloud Run が待機インスタンスを裏で入れ替えた（`a50f150a` → `b331db56`、入れ替え後のインスタンスは既に 1310 秒稼働）。最終値は `report` で確定 | 起動は計測対象外（コールドスタートが起きない） |
-| min 1 / boost なし | （記入） | |
+| min 1 / boost なし | アイドル後・常駐 5 標本。`/` 161〜218ms、`/health` 91〜140ms | 起動は計測対象外 |
 
 ## 9. #10 / #11 への引き継ぎ
 
-- **#10（運用）**: コールドスタートを避けたい時間帯だけ `min-instances=1` にする運用（スケジュールで `gcloud run services update --min-instances`）は運用面の選択肢。起動プローブの period 短縮も同様
-- **#11（コスト）**: §6 の式に料金表の単価を入れて `min-instances=1` の月額を確定する。`min-instances=0` の場合の課金はリクエスト処理中（`POST /update` 0.5 秒 × 回数、docs/06）だけ
+- **#10（運用）**: 推奨は min 0（初回 2.3 秒を許容する）。初回の待ちを避けたい時間帯だけ `min-instances=1` にする運用（スケジュールで `gcloud run services update --min-instances`）は選択肢。起動プローブの間隔短縮（§5 の任意の追加計測）も同様
+- **#11（コスト）**: §6 の式に料金表の単価を入れて `min-instances=1` の月額を確定する。推奨の min 0 では、課金はリクエスト処理中（`POST /update` 0.5 秒 × 回数、docs/06）とコールドスタートの起動分だけ。startup CPU boost は効果が無いので費用に含めない
