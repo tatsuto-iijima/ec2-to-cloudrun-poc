@@ -24,7 +24,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | 項目 | 選定 |
 |---|---|
 | コンテナ | 公式 `php:8.x-apache` ベース。`PORT` 環境変数で Listen。Apache の access/error ログは stdout/stderr へ出力（Cloud Logging に自動収集）。`docker/Dockerfile` は `runtime`（実行用。Cloud Run にデプロイ）と `dev`（Dev Container 用。git / composer / gcloud CLI 入り）の 2 ステージで、**実行イメージのビルドは `--target runtime` を明示する** |
-| 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1`。`min_instances`（既定 0）と `startup_cpu_boost`（既定 false）は #9 のコールドスタート比較用の変数（`docs/07`）。#8 の実測: `POST /update` は 1MB 0.45 秒 / 50MB 2.8 秒（タイムアウト 300 秒）、新リビジョン直後の初回は +約 1 秒。二重送信は `Updater` の `flock` で直列化済み、インスタンス入れ替え後も継続できる（`docs/06`） |
+| 実行基盤 | Cloud Run v2 サービス、第2世代実行環境（Cloud Storage ボリュームに必須）、`max-instances=1`。`min_instances`（既定 0）/ `startup_cpu_boost`（既定 false）/ `startup_probe_period_seconds`（既定 2）は #9 のコールドスタート比較用の変数。#9 の実測: アイドル後の初回は min 0 で 2.2〜2.4 秒（`/` の p95 2.35 秒）、min 1 で 0.2 秒前後。boost は効果なし。推奨は min 0 / boost なし（`docs/07`）。#8 の実測: `POST /update` は 1MB 0.45 秒 / 50MB 2.8 秒（タイムアウト 300 秒）、新リビジョン直後の初回は +約 1 秒。二重送信は `Updater` の `flock` で直列化済み、インスタンス入れ替え後も継続できる（`docs/06`） |
 | 作業領域 | Cloud Run 標準の Cloud Storage ボリュームマウント（内部で gcsfuse）。コンテナ内で gcsfuse を自前起動しない。マウント先は `/mnt/data`、アプリには `DATA_DIR` 環境変数で渡す。#7 の実測: 書き込みは 1 回 0.1〜0.2 秒（全体再アップロード）、読み込み 40ms（同一インスタンスで読み直すと 1ms）、`flock` は同一インスタンス内で直列化される、アプリ以外で書き換えたオブジェクトは最大 60 秒古い内容が見える（`docs/05`） |
 | IaC | Terraform。`terraform/gcp`（Artifact Registry, Cloud Storage, サービスアカウント, Cloud Run v2）と `terraform/aws`（S3, IAM ロール + OIDC 信頼）に分割。state は GCS の remote backend（バケット `<PROJECT_ID>-tfstate` を prefix `gcp` / `aws` で共有。ロック内蔵）。init は `scripts/tf-init.sh gcp\|aws` |
 | S3 認証（主案） | Workload Identity Federation の逆方向。AWS IAM ロールの信頼ポリシーに `accounts.google.com` の Web Identity を設定し、条件キー（`sub` / `aud` = SA の一意 ID、`oaud` = ロール ARN）で Cloud Run のサービスアカウントに限定。PHP 側（`app/src/GoogleWebIdentityCredentialProvider.php`）はメタデータサーバーから ID トークンを取得し STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得て `/tmp` にキャッシュする。**鍵レス**（#6 で実装。`docs/04`） |
@@ -243,10 +243,11 @@ scripts/update-bench.sh reset            # data.json の埋め草を外す
 
 ```bash
 export BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url)
-# 構成は tfvars の min_instances（0/1）/ startup_cpu_boost（true/false）で切り替えて apply。1 標本 16 分以上かかるので nohup で流す
+# 構成は tfvars の min_instances（0/1）/ startup_cpu_boost（true/false）/ startup_probe_period_seconds（既定 2）で切り替えて apply。1 標本 16 分以上かかるので nohup で流す
 nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &     # IDLE（既定 960 秒）待って初回 TTFB を測り、X-Instance-* でコールド判定。N（既定 5）個集める
 scripts/cold-start.sh report                                   # 構成 × パス × cold/warm の p50 / p95
-scripts/cold-start.sh startup-log                              # gcsfuse マウント → 起動プローブ成功の時刻
+scripts/cold-start.sh startup-log                              # gcsfuse マウント → Apache 起動 → 起動プローブ成功の時刻（gcloud logging read）
+scripts/cold-start.sh image-size                               # Artifact Registry のイメージサイズ
 # min_instances>=1 の構成は常駐モード（落ちないのでアイドル後の初回をそのまま採用し、待ちを延ばさない。N=5 で約 80 分）
 # gcloud の認証が切れる（十数時間）と再開手順を出して止まる。gcloud auth login --no-launch-browser の後、同じコマンドで続きから追記される
 # 計測中はサービスに触らない（アイドルが途切れる）。min_instances=1 は課金が発生するので終わったら 0 に戻して apply
