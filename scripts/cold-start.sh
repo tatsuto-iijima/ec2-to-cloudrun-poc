@@ -169,17 +169,32 @@ report() {
 }
 
 startup_log() {
+  # gcsfuse のマウント完了と起動プローブ成功は Cloud Run のシステムログ（varlog/system）に出る。
+  # gcloud run services logs read はコンテナの stdout/stderr とリクエストログが中心で、これらを拾えないので logging read を使う
   local svc
   svc=$(terraform -chdir=terraform/gcp output -raw service_name)
-  gcloud run services logs read "$svc" --region asia-northeast1 --limit 300 --format 'value(timestamp,textPayload)' 2>/dev/null \
-    | grep -iE 'successfully mounted|STARTUP .*probe|resuming normal operations|Container called exit|Default STARTUP' | tail -n 12
-  echo "（gcsfuse のマウント完了 → Apache 起動 → 起動プローブ成功 の順。差がコンテナ起動の内訳）"
+  gcloud logging read \
+    "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$svc\" AND (\"successfully mounted\" OR \"STARTUP\" OR \"resuming normal operations\")" \
+    --freshness="${FRESHNESS:-7d}" --order=asc --limit="${LIMIT:-60}" \
+    --format='value(timestamp,resource.labels.revision_name,textPayload,jsonPayload.message)'
+  echo "（起動ごとに gcsfuse のマウント完了 → Apache 起動（resuming normal operations）→ 起動プローブ成功（STARTUP ... probe succeeded）の順に並ぶ。時刻差がコンテナ起動の内訳）"
 }
 
 image_size() {
-  local repo="poc-app"
-  gcloud artifacts files list --repository="$repo" --location=asia-northeast1 --format='value(sizeBytes)' 2>/dev/null \
-    | php -r '$s=0; foreach (file("php://stdin") as $l) { $s += (int) trim($l); } printf("Artifact Registry %s の全レイヤー合計: %.1f MB（タグ間で共有されるレイヤーを含む。1 イメージの実サイズは docker image inspect で）\n", $argv[1], $s / 1048576);' "$repo"
+  # Artifact Registry のイメージ（タグ付き）のサイズ。metadata.imageSizeBytes は圧縮済みレイヤーの合計（pull する量）
+  local image
+  image=$(terraform -chdir=terraform/gcp output -raw image_uri)
+  gcloud artifacts docker images list "$image" --include-tags --sort-by=~UPDATE_TIME --limit=3 --format=json \
+    | php -r '
+        $imgs = json_decode(stream_get_contents(STDIN), true);
+        if (!is_array($imgs) || $imgs === []) { fwrite(STDERR, "イメージが見つかりません: {$argv[1]}\n"); exit(1); }
+        foreach ($imgs as $i) {
+          $tags = is_array($i["tags"] ?? null) ? implode(",", $i["tags"]) : (string) ($i["tags"] ?? "");
+          $bytes = $i["metadata"]["imageSizeBytes"] ?? null;
+          $size = $bytes === null ? "取得できない（gcloud artifacts docker images describe で確認）" : sprintf("%.1f MB", (int) $bytes / 1048576);
+          printf("%s  tags=%s  %s\n", substr((string) ($i["version"] ?? ""), 0, 19), $tags === "" ? "-" : $tags, $size);
+        }
+      ' "$image"
 }
 
 case "$cmd" in
