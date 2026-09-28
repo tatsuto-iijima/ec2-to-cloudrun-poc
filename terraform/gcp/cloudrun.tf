@@ -89,9 +89,12 @@ resource "google_cloud_run_v2_service" "app" {
           port = 8080
         }
         initial_delay_seconds = 0
-        period_seconds        = 2
-        timeout_seconds       = 2
-        failure_threshold     = 15
+        # 間隔を短くすると、Apache が上がってからプローブ成功までの待ちが縮む（#9 で比較。docs/07 §5）
+        period_seconds = var.startup_probe_period_seconds
+        # timeout は period 以下にする必要がある
+        timeout_seconds = min(2, var.startup_probe_period_seconds)
+        # 失敗と判定するまでの合計はおよそ 30 秒に保つ
+        failure_threshold = ceil(30 / var.startup_probe_period_seconds)
       }
     }
 

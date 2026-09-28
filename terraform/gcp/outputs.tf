@@ -40,5 +40,5 @@ output "service_name" {
 
 output "cold_start_config" {
   description = "コールドスタート計測の構成ラベル（scripts/cold-start.sh が結果に記録する）"
-  value       = "min${var.min_instances}-boost${var.startup_cpu_boost ? 1 : 0}"
+  value       = "min${var.min_instances}-boost${var.startup_cpu_boost ? 1 : 0}${var.startup_probe_period_seconds == 2 ? "" : "-probe${var.startup_probe_period_seconds}"}"
 }
