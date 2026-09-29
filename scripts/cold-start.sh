@@ -82,7 +82,14 @@ record() { # record <json>
 }
 
 sample() {
-  [[ -n "$LABEL" ]] || LABEL=$(terraform -chdir=terraform/gcp output -raw cold_start_config 2>/dev/null || echo unknown)
+  # 構成ラベルが取れないまま走ると、どの構成の結果か分からなくなる（unknown のまま 15 回走った。docs/07 つまずいた点 4）
+  if [[ -z "$LABEL" ]]; then
+    if ! LABEL=$(terraform -chdir=terraform/gcp output -raw cold_start_config 2>/dev/null) || [[ -z "$LABEL" || "$LABEL" == *$'\n'* ]]; then
+      echo "構成ラベル（terraform output cold_start_config）を取得できません。ADC が切れていれば gcloud auth application-default login --no-launch-browser、" >&2
+      echo "apply 前なら terraform -chdir=terraform/gcp apply を先に実行してください（LABEL=... で明示することもできます）" >&2
+      exit 1
+    fi
+  fi
   # min_instances>=1 はインスタンスが落ちないので常駐モード（成功した試行をそのまま採用し、待ち時間を延ばさない）
   local resident=false
   [[ "$LABEL" =~ ^min[1-9] ]] && resident=true
@@ -144,7 +151,8 @@ report() {
   php -r '
     $all = array_map(fn($l) => json_decode($l, true), file($argv[1], FILE_IGNORE_NEW_LINES));
     // 壊れた行（修正前の版が書いた "code":000 など）と、失敗した試行（HTTP 200 以外）は集計しない
-    $rows = array_values(array_filter($all, fn($r) => is_array($r) && isset($r["ttfb_ms"]) && ($r["ok"] ?? true) !== false && (int) ($r["code"] ?? 0) === 200));
+    // 構成が分からない行（ラベル unknown）も集計しない
+    $rows = array_values(array_filter($all, fn($r) => is_array($r) && isset($r["ttfb_ms"]) && ($r["ok"] ?? true) !== false && (int) ($r["code"] ?? 0) === 200 && ($r["label"] ?? "unknown") !== "unknown"));
     $skipped = count($all) - count($rows);
     $g = [];
     foreach ($rows as $r) {
@@ -164,20 +172,48 @@ report() {
       printf("%-14s %-8s %-26s %3d %7.0f %7.0f %7.0f %7.0f\n", $label, $path, $kind, count($v), $pct($v, 50), $pct($v, 95), min($v), max($v));
     }
     echo "（ms。min 0 は first(cold)、min 1 は first(アイドル後・常駐) が「アイドル後の初回」。p95 は昇順 ceil(0.95n) 番目）\n";
-    if ($skipped > 0) { echo "失敗・不正な行 {$skipped} 件は集計から除外\n"; }
+    if ($skipped > 0) { echo "失敗・不正な行とラベル unknown の行 {$skipped} 件は集計から除外\n"; }
   ' "$OUT"
 }
 
 startup_log() {
   # gcsfuse のマウント完了と起動プローブ成功は Cloud Run のシステムログ（varlog/system）に出る。
-  # gcloud run services logs read はコンテナの stdout/stderr とリクエストログが中心で、これらを拾えないので logging read を使う
+  # gcloud run services logs read はそれを含まないので logging read を使う。新しい方から LIMIT 件を取り、時系列に並べ直して
+  # 起動ごと（マウント完了で区切る）の内訳を表にする。RAW=1 なら生の行を出す
   local svc
   svc=$(terraform -chdir=terraform/gcp output -raw service_name)
   gcloud logging read \
     "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$svc\" AND (\"successfully mounted\" OR \"STARTUP\" OR \"resuming normal operations\")" \
-    --freshness="${FRESHNESS:-7d}" --order=asc --limit="${LIMIT:-60}" \
-    --format='value(timestamp,resource.labels.revision_name,textPayload,jsonPayload.message)'
-  echo "（起動ごとに gcsfuse のマウント完了 → Apache 起動（resuming normal operations）→ 起動プローブ成功（STARTUP ... probe succeeded）の順に並ぶ。時刻差がコンテナ起動の内訳）"
+    --freshness="${FRESHNESS:-7d}" --order=desc --limit="${LIMIT:-90}" \
+    --format='value(timestamp,resource.labels.revision_name,textPayload,jsonPayload.message)' \
+    | php -r '
+        $lines = [];
+        foreach (file("php://stdin", FILE_IGNORE_NEW_LINES) as $l) {
+          $f = explode("\t", $l);
+          $msg = trim(implode(" ", array_slice($f, 2)));
+          if ($msg === "") { continue; }                 // 本文の無い行（監査ログなど）は捨てる
+          $lines[] = [$f[0], $f[1] ?? "", $msg];
+        }
+        $lines = array_reverse($lines);                  // 新しい順で取ったので時系列に戻す
+        if (getenv("RAW") === "1") { foreach ($lines as $x) { echo implode("\t", $x), "\n"; } exit; }
+        $t = fn($ts) => (float) (new DateTimeImmutable($ts))->format("U.u");
+        $open = []; $rows = [];
+        foreach ($lines as [$ts, $rev, $msg]) {
+          if (str_contains($msg, "successfully mounted")) { $open[$rev] = ["rev" => $rev, "at" => $ts, "mount" => $t($ts)]; }
+          elseif (str_contains($msg, "resuming normal operations") && isset($open[$rev]) && !isset($open[$rev]["apache"])) { $open[$rev]["apache"] = $t($ts); }
+          elseif (preg_match("/probe succeeded after (\d+) attempt/", $msg, $m) && isset($open[$rev])) {
+            $g = $open[$rev]; unset($open[$rev]);
+            $rows[] = [$g["at"], $rev, isset($g["apache"]) ? $g["apache"] - $g["mount"] : null, isset($g["apache"]) ? $t($ts) - $g["apache"] : null, $t($ts) - $g["mount"], (int) $m[1]];
+          }
+        }
+        if ($rows === []) { echo "起動の記録が見つかりません（FRESHNESS=30d や LIMIT を増やす、RAW=1 で生の行を確認）\n"; exit; }
+        $fmt = fn($v) => $v === null ? "    -" : sprintf("%5.2f", $v);
+        printf("%-27s %-20s %13s %14s %14s %4s\n", "マウント完了時刻", "revision", "マウント→Apache", "Apache→プローブ", "マウント→プローブ", "試行");
+        foreach ($rows as [$at, $rev, $a, $b, $c, $n]) { printf("%-27s %-20s %13s %14s %14s %4d\n", substr($at, 0, 23), $rev, $fmt($a), $fmt($b), $fmt($c), $n); }
+        $col = fn($i) => array_values(array_filter(array_column($rows, $i), fn($v) => $v !== null));
+        $med = function (array $v) { sort($v); return $v[intdiv(count($v), 2)]; };
+        printf("起動 %d 回。中央値: マウント→Apache %.2f 秒 / Apache→プローブ %.2f 秒 / マウント→プローブ %.2f 秒（秒）\n", count($rows), $med($col(2)), $med($col(3)), $med($col(4)));
+      '
 }
 
 image_size() {
