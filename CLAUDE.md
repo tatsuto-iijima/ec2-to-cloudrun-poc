@@ -30,7 +30,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | S3 認証（主案） | Workload Identity Federation の逆方向。AWS IAM ロールの信頼ポリシーに `accounts.google.com` の Web Identity を設定し、条件キー（`sub` / `aud` = SA の一意 ID、`oaud` = ロール ARN）で Cloud Run のサービスアカウントに限定。PHP 側（`app/src/GoogleWebIdentityCredentialProvider.php`）はメタデータサーバーから ID トークンを取得し STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得て `/tmp` にキャッシュする。**鍵レス**（#6 で実装。`docs/04`） |
 | S3 認証（代替案） | IAM ユーザーのアクセスキーを Secret Manager に格納して Cloud Run に注入。主案が成立しない場合のみ |
 | S3 クライアント | AWS SDK for PHP。認証は SDK のクレデンシャルプロバイダに委ね、WIF 実装に差し替えられる構造にする |
-| 運用（#10。`docs/08`） | ログ = Cloud Logging（stdout / stderr とリクエストログ。既定 30 日保持）を `scripts/ops.sh logs\|errors\|requests` で読む。監視 = Cloud Run の標準メトリクス + 5xx のメールアラート（`terraform/gcp/monitoring.tf`。`alert_email` を書くと有効、空なら作らない）。デプロイ = `build-push.sh` → `terraform apply`（`gcloud run deploy` やコンソール編集はしない。次の apply で消える）。ロールバック = 緊急は `ops.sh rollback <REV>`（トラフィック固定。**固定したまま apply しない**: `cloudrun.tf` は traffic を管理しないので新リビジョンに流れない。解除は `ops.sh to-latest`）、正規は `image.auto.tfvars` を前のタグにして apply |
+| 運用（#10。`docs/08`） | ログ = Cloud Logging（stdout / stderr とリクエストログ。既定 30 日保持）を `scripts/ops.sh logs\|errors\|requests` で読む。**アプリのログは `App\Log::write()`（`php://stderr` に直接）で書き、`error_log()` は使わない**（mod_php では Apache の error ログを経由し、日本語が `\xNN` にエスケープされて読めない。docs/08 つまずいた点 1）。監視 = Cloud Run の標準メトリクス + 5xx のメールアラート（`terraform/gcp/monitoring.tf`。`alert_email` を書くと有効、空なら作らない）。デプロイ = `build-push.sh` → `terraform apply`（`gcloud run deploy` やコンソール編集はしない。次の apply で消える）。ロールバック = 緊急は `ops.sh rollback <REV>`（トラフィック固定。**固定したまま apply しない**: `cloudrun.tf` は traffic を管理しないので新リビジョンに流れない。解除は `ops.sh to-latest`）、正規は `image.auto.tfvars` を前のタグにして apply（`ops.sh revisions` がダイジェストからタグを引く。リビジョンは設定も含むので、戻す前に `gcloud run revisions describe` で環境変数を確認） |
 
 ### 検証アーキテクチャ
 
@@ -45,11 +45,11 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 ### サンプルアプリの仕様（最小構成。#4 で実装済み）
 
 - `GET /` : JSON の現在値を表示し、更新フォームを出す
-- `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303（`app/src/Updater.php`。全体を `flock` で直列化し、PUT はファイルのストリームで送る）。各段階の所要時間（ms）を `error_log` に 1 行出し、303 の `Location` にも `read / write / put` を入れる（`scripts/update-bench.sh` が読む）
+- `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303（`app/src/Updater.php`。全体を `flock` で直列化し、PUT はファイルのストリームで送る）。各段階の所要時間（ms）を `Log::write` で stderr に 1 行出し、303 の `Location` にも `read / write / put` を入れる（`scripts/update-bench.sh` が読む）
 - `POST /fs-check` : gcsfuse 検証用の診断（Issue #7、`docs/05`）。**`FS_CHECK=1` のときだけ有効**（無効時は 404）。`DATA_DIR/fs-check/` 配下で `case`（`rmw` / `rename` / `lock` / `append` / `size` など）を実行して所要時間と戻り値を JSON で返す。`case=pad` だけは `data.json` 本体に埋め草を入れる（#8 のサイズ別計測用）。`scripts/fs-check.sh` / `scripts/update-bench.sh` から呼ぶ
 - 全応答に `X-Instance-Id`（`/tmp/instance-id` の乱数。インスタンスが入れ替わると変わる）と `X-Instance-Uptime`（最初のリクエストからの秒数）を付ける（`app/src/InstanceInfo.php`。コールドスタート判定に使う。`docs/07`）
 - `GET /health` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）。**`/healthz` は使わない**: Cloud Run の予約済み URL パス（`/eventlog`、`/_ah/` で始まるパス、**末尾が `z` のパス**）は Google のフロントエンドが横取りして 404 を返し、コンテナに届かない。経路を足すときもこの 3 種は避ける（Cloud Run の既知の問題「予約済みの URL パス」。docs/03 つまずいた点 5）
-- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/Updater.php`（`/update` の本体。flock で直列化）、`app/src/S3Uploader.php`（S3 PUT）、`app/src/GoogleWebIdentityCredentialProvider.php`（WIF の認証）、`app/src/FsCheck.php`（`/fs-check` の診断ロジック）、`app/src/InstanceInfo.php`（インスタンス ID と稼働秒数）、`app/templates/index.php`（画面）
+- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/Updater.php`（`/update` の本体。flock で直列化）、`app/src/S3Uploader.php`（S3 PUT）、`app/src/GoogleWebIdentityCredentialProvider.php`（WIF の認証）、`app/src/FsCheck.php`（`/fs-check` の診断ロジック）、`app/src/InstanceInfo.php`（インスタンス ID と稼働秒数）、`app/src/Log.php`（stderr への 1 行ログ）、`app/templates/index.php`（画面）
 
 | 環境変数 | 既定 | 説明 |
 |---|---|---|
@@ -260,7 +260,7 @@ scripts/cold-start.sh image-size                               # Artifact Regist
 scripts/ops.sh logs 50            # アプリのログ（stdout + stderr）を時系列で。範囲は FRESHNESS（既定 1d）
 scripts/ops.sh errors 20          # stderr のエラー行と 5xx のリクエスト
 scripts/ops.sh requests 20        # Cloud Run のリクエストログ（ステータス、レイテンシ）
-scripts/ops.sh revisions          # リビジョン（イメージタグ）とトラフィック。固定中は警告
+scripts/ops.sh revisions 10       # 新しい方から 10 件のリビジョン（ダイジェストから引いたタグ）とトラフィック。固定中は警告
 scripts/ops.sh rollback <REV>     # 緊急の切り戻し（トラフィックを 100% そのリビジョンへ）
 scripts/ops.sh to-latest          # 切り戻しの解除。terraform apply の前に必ず戻す
 echo 'alert_email = "<address>"' >> terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply   # 5xx アラートを有効化
