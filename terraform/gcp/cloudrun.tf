@@ -22,7 +22,7 @@ resource "google_cloud_run_v2_service" "app" {
 
     # 一人で操作する前提。max 1 で複数インスタンスに起因する gcsfuse のキャッシュ不整合を構造的に排除する
     scaling {
-      min_instance_count = 0
+      min_instance_count = var.min_instances
       max_instance_count = var.max_instances
     }
     max_instance_request_concurrency = var.concurrency
@@ -41,6 +41,8 @@ resource "google_cloud_run_v2_service" "app" {
         }
         # リクエスト処理中のみ CPU を割り当てる（従量課金の基本構成）
         cpu_idle = true
+        # 起動時の CPU 増強（#9 でコールドスタートへの効果を比較）
+        startup_cpu_boost = var.startup_cpu_boost
       }
 
       # アプリの設定（app/src/Config.php が読む）。AWS のアクセスキーは渡さず、
@@ -87,9 +89,12 @@ resource "google_cloud_run_v2_service" "app" {
           port = 8080
         }
         initial_delay_seconds = 0
-        period_seconds        = 2
-        timeout_seconds       = 2
-        failure_threshold     = 15
+        # 間隔を短くすると、Apache が上がってからプローブ成功までの待ちが縮む（#9 で比較。docs/07 §5）
+        period_seconds = var.startup_probe_period_seconds
+        # timeout は period 以下にする必要がある
+        timeout_seconds = min(2, var.startup_probe_period_seconds)
+        # 失敗と判定するまでの合計はおよそ 30 秒に保つ
+        failure_threshold = ceil(30 / var.startup_probe_period_seconds)
       }
     }
 

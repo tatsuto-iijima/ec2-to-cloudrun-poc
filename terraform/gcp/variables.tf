@@ -76,6 +76,29 @@ variable "fs_check" {
   default     = false
 }
 
+variable "min_instances" {
+  description = "Cloud Run の最小インスタンス数。0 ならアイドルで 0 台になりコールドスタートが起きる。1 なら常時 1 台（#9 で比較。docs/07）"
+  type        = number
+  default     = 0
+}
+
+variable "startup_cpu_boost" {
+  description = "起動時に CPU を増やす（startup CPU boost）。コールドスタートの短縮に効くかを #9 で比較する（docs/07）"
+  type        = bool
+  default     = false
+}
+
+variable "startup_probe_period_seconds" {
+  description = "起動プローブ（GET /health）の間隔（秒）。コールドスタートへの影響を #9 で比較する（docs/07）。失敗までの合計はおよそ 30 秒に保つ"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.startup_probe_period_seconds >= 1 && var.startup_probe_period_seconds <= 10
+    error_message = "startup_probe_period_seconds は 1〜10 を指定してください。"
+  }
+}
+
 variable "max_instances" {
   description = "Cloud Run の最大インスタンス数。一人で操作する前提のため 1（複数インスタンスに起因する gcsfuse のキャッシュ不整合を避ける）"
   type        = number

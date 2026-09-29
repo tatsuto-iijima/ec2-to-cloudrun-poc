@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# コールドスタート（アイドル後の初回リクエスト）の TTFB を計測する（Issue #9、docs/07）。
+#
+# 使い方:
+#   BASE_URL=https://poc-app-xxxx.a.run.app scripts/cold-start.sh [sample|report|startup-log|image-size]
+#     sample       IDLE 秒（既定 960 = 16 分）待ってから 1 リクエストを投げ、初回の TTFB を測る。コールド（インスタンスが
+#                  入れ替わり、uptime が COLD_MAX_UPTIME 秒以内）なら採用。N 個（既定 5）のコールド標本が集まるまで繰り返す。
+#                  奇数回目は GET /（gcsfuse 読み込みあり）、偶数回目は GET /health（読み込みなし）を初回にし、直後にもう一方を
+#                  「同一インスタンスの 2 回目」として測る。結果は OUT（既定 cold-start-results.jsonl）に追記
+#                  構成が min_instances>=1（ラベルが min1〜min9 で始まる）なら「常駐モード」: インスタンスは落ちないので、
+#                  成功した試行をそのまま「アイドル後の初回」の標本にし、待ち時間は延ばさない（N=5 で約 80 分）
+#                  gcloud の認証が切れたら（組織のセッション制御で十数時間）再開手順を出して終了コード 3 で止まる。
+#                  同じコマンドで再開すると続きから追記される
+#     report       OUT を構成 × パス × cold/warm で集計し、p50 / p95 / min / max を表示する（既定）
+#     startup-log  直近の起動ログ（gcsfuse マウント → 起動プローブ成功）を時刻付きで表示する
+#     image-size   Artifact Registry 上のイメージのレイヤー合計サイズを表示する
+#   環境変数:
+#     TOKEN            ID トークン（run.app なら自動取得。IDLE 中に期限切れ（1 時間）になるので毎回取り直す）
+#     LABEL            構成ラベル。既定は terraform output cold_start_config（例 min0-boost0）
+#     N                集めるコールド標本の数（既定 5）。MAX_TRIES（既定 N*3）回試しても足りなければ終了
+#     IDLE             アイドル秒数（既定 960）。コールドにならなかったら EXTRA 秒（既定 300）延ばして再試行（上限 MAX_IDLE、既定 1800）
+#     COLD_MAX_UPTIME  コールドと判定する X-Instance-Uptime の上限秒（既定 10。起動プローブが最初のリクエストになるため 0 にはならない）
+#     OUT              結果の jsonl（既定 cold-start-results.jsonl。gitignore 済み）
+#   長時間かかるので Dev Container で nohup で流す: nohup scripts/cold-start.sh sample > cold-start.log 2>&1 &
+set -euo pipefail
+
+BASE_URL="${BASE_URL:-http://localhost:8080}"
+TOKEN="${TOKEN:-}"
+LABEL="${LABEL:-}"
+N="${N:-5}"
+MAX_TRIES="${MAX_TRIES:-$((N * 3))}"
+IDLE="${IDLE:-960}"
+EXTRA="${EXTRA:-300}"
+MAX_IDLE="${MAX_IDLE:-1800}"
+COLD_MAX_UPTIME="${COLD_MAX_UPTIME:-10}"
+OUT="${OUT:-cold-start-results.jsonl}"
+cmd="${1:-report}"
+
+cd "$(dirname "$0")/.."
+
+# 認証ヘッダー。ヘッダーは空白を含むので必ず配列で curl に渡す（文字列にして展開すると
+# "Bearer" とトークンが別の引数に割れ、curl がホスト名として解釈する。docs/07 つまずいた点 1）。
+# IDLE（16 分）の間に ID トークン（1 時間）が切れうるので、リクエストのたびに取り直す。
+# probe はプロセス置換のサブシェルで動くので、取り直しはメインのシェルで行う（失敗したら理由を出して止められるように）
+auth=()
+refresh_auth() {
+  auth=()
+  local t="$TOKEN"
+  if [[ -z "$t" && "$BASE_URL" == *.run.app* ]]; then
+    if ! t=$(gcloud auth print-identity-token); then
+      cat >&2 <<EOF
+$(date -u +%FT%TZ) ID トークンを取得できませんでした（gcloud の再認証が必要です。組織のセッション制御で十数時間ごとに切れます）。
+再開するには:
+  gcloud auth login --no-launch-browser
+  同じコマンド（$0 sample）をもう一度実行する。収集済みの標本は $OUT に残っていて、続きから追記されます
+EOF
+      exit 3
+    fi
+  fi
+  if [[ -n "$t" ]]; then auth=(-H "Authorization: Bearer $t"); fi
+}
+
+# 1 リクエストを測り、"code<TAB>ttfb_ms<TAB>total_ms<TAB>instance<TAB>uptime" を返す。
+# curl が失敗したら code=0（stderr に 1 行）。instance / uptime はヘッダーが無ければ空
+probe() { # probe <path>
+  local hdr out code ttfb total inst up
+  hdr=$(mktemp)
+  if ! out=$(curl -sS "${auth[@]}" -o /dev/null -D "$hdr" -w '%{http_code}\t%{time_starttransfer}\t%{time_total}' "$BASE_URL$1"); then
+    echo "$(date -u +%FT%TZ) curl が失敗: $BASE_URL$1" >&2
+    out=$'0\t0\t0'
+  fi
+  IFS=$'\t' read -r code ttfb total <<<"$out"
+  inst=$(grep -i '^x-instance-id:' "$hdr" | tr -d '\r' | awk '{print $2}' || true)
+  up=$(grep -i '^x-instance-uptime:' "$hdr" | tr -d '\r' | awk '{print $2}' || true)
+  rm -f "$hdr"
+  # code は "000" のような先頭ゼロを数値に直す（JSON に書くため）
+  printf '%d\t%.0f\t%.0f\t%s\t%s\n' "$((10#${code:-0}))" "$(php -r 'echo (float) $argv[1] * 1000;' "${ttfb:-0}")" "$(php -r 'echo (float) $argv[1] * 1000;' "${total:-0}")" "${inst:-}" "${up:-}"
+}
+
+record() { # record <json>
+  printf '%s\n' "$1" >>"$OUT"
+}
+
+sample() {
+  # 構成ラベルが取れないまま走ると、どの構成の結果か分からなくなる（unknown のまま 15 回走った。docs/07 つまずいた点 4）
+  if [[ -z "$LABEL" ]]; then
+    if ! LABEL=$(terraform -chdir=terraform/gcp output -raw cold_start_config 2>/dev/null) || [[ -z "$LABEL" || "$LABEL" == *$'\n'* ]]; then
+      echo "構成ラベル（terraform output cold_start_config）を取得できません。ADC が切れていれば gcloud auth application-default login --no-launch-browser、" >&2
+      echo "apply 前なら terraform -chdir=terraform/gcp apply を先に実行してください（LABEL=... で明示することもできます）" >&2
+      exit 1
+    fi
+  fi
+  # min_instances>=1 はインスタンスが落ちないので常駐モード（成功した試行をそのまま採用し、待ち時間を延ばさない）
+  local resident=false
+  [[ "$LABEL" =~ ^min[1-9] ]] && resident=true
+  if [[ "$resident" == true ]]; then
+    echo "構成 $LABEL（常駐モード）: アイドル後の初回を $N 個（IDLE ${IDLE}s、最大 $MAX_TRIES 回）。結果: $OUT"
+  else
+    echo "構成 $LABEL: コールド標本 $N 個（IDLE ${IDLE}s〜${MAX_IDLE}s、判定 uptime<=${COLD_MAX_UPTIME}s、最大 $MAX_TRIES 回）。結果: $OUT"
+  fi
+  local prev="" collected=0 tries=0 wait="$IDLE" i first second
+  # 前回の計測で最後に見たインスタンス ID（あれば）。無ければ 1 回だけ /health で取得する（これで idle タイマーが動き出す）
+  prev=$(grep -h "\"label\":\"$LABEL\"" "$OUT" 2>/dev/null | tail -1 | php -r '$d=json_decode(stream_get_contents(STDIN),true); echo $d["instance"]??"";' || true)
+  if [[ -z "$prev" ]]; then
+    local c0
+    refresh_auth
+    IFS=$'\t' read -r c0 _ _ prev _ < <(probe /health)
+    if [[ "$c0" != 200 || -z "$prev" ]]; then
+      echo "GET /health が $c0 でした（X-Instance-Id: ${prev:-なし}）。BASE_URL・認証（gcloud auth login）・デプロイ済みのイメージ（X-Instance-* を返す版か）を確認してください" >&2
+      exit 1
+    fi
+    echo "$(date -u +%FT%TZ) 現在のインスタンス: $prev（ここからアイドルを数える）"
+  fi
+  while (( collected < N && tries < MAX_TRIES )); do
+    tries=$((tries + 1))
+    echo "$(date -u +%FT%TZ) [$tries] ${wait}s 待つ..."
+    sleep "$wait"
+    i=$((collected + 1))
+    if (( i % 2 == 1 )); then first=/; second=/health; else first=/health; second=/; fi
+    local c1 t1 tot1 inst1 up1 c2 t2 tot2 inst2 up2 cold ok ts
+    refresh_auth
+    ts=$(date -u +%FT%TZ)
+    IFS=$'\t' read -r c1 t1 tot1 inst1 up1 < <(probe "$first")
+    IFS=$'\t' read -r c2 t2 tot2 inst2 up2 < <(probe "$second")
+    if [[ "$c1" == 200 && "$c2" == 200 && -n "$inst1" ]]; then ok=true; else ok=false; fi
+    if [[ "$ok" == true && "$inst1" != "$prev" && -n "$up1" && "$up1" -le "$COLD_MAX_UPTIME" ]]; then cold=true; else cold=false; fi
+    record "{\"ts\":\"$ts\",\"label\":\"$LABEL\",\"try\":$tries,\"order\":\"first\",\"path\":\"$first\",\"ok\":$ok,\"resident\":$resident,\"code\":$c1,\"ttfb_ms\":$t1,\"total_ms\":$tot1,\"instance\":\"$inst1\",\"uptime\":${up1:-null},\"prev\":\"$prev\",\"cold\":$cold,\"idle_s\":$wait}"
+    record "{\"ts\":\"$ts\",\"label\":\"$LABEL\",\"try\":$tries,\"order\":\"second\",\"path\":\"$second\",\"ok\":$ok,\"code\":$c2,\"ttfb_ms\":$t2,\"total_ms\":$tot2,\"instance\":\"$inst2\",\"uptime\":${up2:-null},\"prev\":\"$prev\",\"cold\":false,\"idle_s\":$wait}"
+    if [[ "$ok" != true ]]; then
+      # 失敗した試行は採用しない。インスタンスが分からないので prev も更新しない
+      echo "$ts   失敗（採用しない）: $first -> HTTP $c1 / $second -> HTTP $c2。次も ${wait}s 待つ"
+      continue
+    fi
+    if [[ "$resident" == true ]]; then
+      collected=$((collected + 1))
+      echo "$ts   IDLE #$collected: $first ttfb=${t1}ms total=${tot1}ms (instance $inst1, uptime ${up1}s) / 2 回目 $second ttfb=${t2}ms"
+    elif [[ "$cold" == true ]]; then
+      collected=$((collected + 1)); wait="$IDLE"
+      echo "$ts   COLD #$collected: $first ttfb=${t1}ms total=${tot1}ms (instance $prev -> $inst1, uptime ${up1}s) / 2 回目 $second ttfb=${t2}ms"
+    else
+      wait=$((wait + EXTRA > MAX_IDLE ? MAX_IDLE : wait + EXTRA))
+      echo "$ts   warm（採用しない）: $first ttfb=${t1}ms instance=$inst1 uptime=${up1}s（前回 $prev）。次は ${wait}s 待つ"
+    fi
+    prev="$inst2"
+  done
+  echo "標本 $collected 個 / $tries 回。集計: $0 report"
+}
+
+report() {
+  [[ -f "$OUT" ]] || { echo "$OUT がありません" >&2; exit 1; }
+  php -r '
+    $all = array_map(fn($l) => json_decode($l, true), file($argv[1], FILE_IGNORE_NEW_LINES));
+    // 壊れた行（修正前の版が書いた "code":000 など）と、失敗した試行（HTTP 200 以外）は集計しない
+    // 構成が分からない行（ラベル unknown）も集計しない
+    $rows = array_values(array_filter($all, fn($r) => is_array($r) && isset($r["ttfb_ms"]) && ($r["ok"] ?? true) !== false && (int) ($r["code"] ?? 0) === 200 && ($r["label"] ?? "unknown") !== "unknown"));
+    $skipped = count($all) - count($rows);
+    $g = [];
+    foreach ($rows as $r) {
+      // min_instances>=1 の初回は常駐インスタンスへの「アイドル後の初回」（resident が無い修正前の行もラベルで判定）
+      $resident = $r["resident"] ?? (bool) preg_match("/^min[1-9]/", $r["label"]);
+      if ($r["order"] === "first" && $resident) { $k = [$r["label"], $r["path"], "first(アイドル後・常駐)"]; }
+      elseif ($r["order"] === "first" && !$r["cold"]) { $k = [$r["label"], $r["path"], "first(warm, 不採用)"]; }
+      elseif ($r["order"] === "first") { $k = [$r["label"], $r["path"], "first(cold)"]; }
+      else { $k = [$r["label"], $r["path"], "second(同一インスタンス)"]; }
+      $g[implode("\t", $k)][] = (float) $r["ttfb_ms"];
+    }
+    ksort($g);
+    $pct = function (array $v, float $p) { sort($v); $i = (int) ceil($p / 100 * count($v)) - 1; return $v[max(0, $i)]; };
+    printf("%-14s %-8s %-26s %3s %7s %7s %7s %7s\n", "label", "path", "kind", "n", "p50", "p95", "min", "max");
+    foreach ($g as $k => $v) {
+      [$label, $path, $kind] = explode("\t", $k);
+      printf("%-14s %-8s %-26s %3d %7.0f %7.0f %7.0f %7.0f\n", $label, $path, $kind, count($v), $pct($v, 50), $pct($v, 95), min($v), max($v));
+    }
+    echo "（ms。min 0 は first(cold)、min 1 は first(アイドル後・常駐) が「アイドル後の初回」。p95 は昇順 ceil(0.95n) 番目）\n";
+    if ($skipped > 0) { echo "失敗・不正な行とラベル unknown の行 {$skipped} 件は集計から除外\n"; }
+  ' "$OUT"
+}
+
+startup_log() {
+  # gcsfuse のマウント完了と起動プローブ成功は Cloud Run のシステムログ（varlog/system）に出る。
+  # gcloud run services logs read はそれを含まないので logging read を使う。新しい方から LIMIT 件を取り、時系列に並べ直して
+  # 起動ごと（マウント完了で区切る）の内訳を表にする。RAW=1 なら生の行を出す
+  local svc
+  svc=$(terraform -chdir=terraform/gcp output -raw service_name)
+  gcloud logging read \
+    "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$svc\" AND (\"successfully mounted\" OR \"STARTUP\" OR \"resuming normal operations\")" \
+    --freshness="${FRESHNESS:-7d}" --order=desc --limit="${LIMIT:-90}" \
+    --format='value(timestamp,resource.labels.revision_name,textPayload,jsonPayload.message)' \
+    | php -r '
+        $lines = [];
+        foreach (file("php://stdin", FILE_IGNORE_NEW_LINES) as $l) {
+          $f = explode("\t", $l);
+          $msg = trim(implode(" ", array_slice($f, 2)));
+          if ($msg === "") { continue; }                 // 本文の無い行（監査ログなど）は捨てる
+          $lines[] = [$f[0], $f[1] ?? "", $msg];
+        }
+        $lines = array_reverse($lines);                  // 新しい順で取ったので時系列に戻す
+        if (getenv("RAW") === "1") { foreach ($lines as $x) { echo implode("\t", $x), "\n"; } exit; }
+        $t = fn($ts) => (float) (new DateTimeImmutable($ts))->format("U.u");
+        $open = []; $rows = [];
+        foreach ($lines as [$ts, $rev, $msg]) {
+          if (str_contains($msg, "successfully mounted")) { $open[$rev] = ["rev" => $rev, "at" => $ts, "mount" => $t($ts)]; }
+          elseif (str_contains($msg, "resuming normal operations") && isset($open[$rev]) && !isset($open[$rev]["apache"])) { $open[$rev]["apache"] = $t($ts); }
+          elseif (preg_match("/probe succeeded after (\d+) attempt/", $msg, $m) && isset($open[$rev])) {
+            $g = $open[$rev]; unset($open[$rev]);
+            $rows[] = [$g["at"], $rev, isset($g["apache"]) ? $g["apache"] - $g["mount"] : null, isset($g["apache"]) ? $t($ts) - $g["apache"] : null, $t($ts) - $g["mount"], (int) $m[1]];
+          }
+        }
+        if ($rows === []) { echo "起動の記録が見つかりません（FRESHNESS=30d や LIMIT を増やす、RAW=1 で生の行を確認）\n"; exit; }
+        $fmt = fn($v) => $v === null ? "    -" : sprintf("%5.2f", $v);
+        printf("%-27s %-20s %13s %14s %14s %4s\n", "マウント完了時刻", "revision", "マウント→Apache", "Apache→プローブ", "マウント→プローブ", "試行");
+        foreach ($rows as [$at, $rev, $a, $b, $c, $n]) { printf("%-27s %-20s %13s %14s %14s %4d\n", substr($at, 0, 23), $rev, $fmt($a), $fmt($b), $fmt($c), $n); }
+        $col = fn($i) => array_values(array_filter(array_column($rows, $i), fn($v) => $v !== null));
+        $med = function (array $v) { sort($v); return $v[intdiv(count($v), 2)]; };
+        printf("起動 %d 回。中央値: マウント→Apache %.2f 秒 / Apache→プローブ %.2f 秒 / マウント→プローブ %.2f 秒（秒）\n", count($rows), $med($col(2)), $med($col(3)), $med($col(4)));
+      '
+}
+
+image_size() {
+  # Artifact Registry のイメージ（タグ付き）のサイズ。metadata.imageSizeBytes は圧縮済みレイヤーの合計（pull する量）
+  local image
+  image=$(terraform -chdir=terraform/gcp output -raw image_uri)
+  gcloud artifacts docker images list "$image" --include-tags --sort-by=~UPDATE_TIME --limit=3 --format=json \
+    | php -r '
+        $imgs = json_decode(stream_get_contents(STDIN), true);
+        if (!is_array($imgs) || $imgs === []) { fwrite(STDERR, "イメージが見つかりません: {$argv[1]}\n"); exit(1); }
+        foreach ($imgs as $i) {
+          $tags = is_array($i["tags"] ?? null) ? implode(",", $i["tags"]) : (string) ($i["tags"] ?? "");
+          $bytes = $i["metadata"]["imageSizeBytes"] ?? null;
+          $size = $bytes === null ? "取得できない（gcloud artifacts docker images describe で確認）" : sprintf("%.1f MB", (int) $bytes / 1048576);
+          printf("%s  tags=%s  %s\n", substr((string) ($i["version"] ?? ""), 0, 19), $tags === "" ? "-" : $tags, $size);
+        }
+      ' "$image"
+}
+
+case "$cmd" in
+  sample) sample ;;
+  report) report ;;
+  startup-log) startup_log ;;
+  image-size) image_size ;;
+  *) echo "usage: $0 [sample|report|startup-log|image-size]" >&2; exit 2 ;;
+esac
