@@ -30,6 +30,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | S3 認証（主案） | Workload Identity Federation の逆方向。AWS IAM ロールの信頼ポリシーに `accounts.google.com` の Web Identity を設定し、条件キー（`sub` / `aud` = SA の一意 ID、`oaud` = ロール ARN）で Cloud Run のサービスアカウントに限定。PHP 側（`app/src/GoogleWebIdentityCredentialProvider.php`）はメタデータサーバーから ID トークンを取得し STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得て `/tmp` にキャッシュする。**鍵レス**（#6 で実装。`docs/04`） |
 | S3 認証（代替案） | IAM ユーザーのアクセスキーを Secret Manager に格納して Cloud Run に注入。主案が成立しない場合のみ |
 | S3 クライアント | AWS SDK for PHP。認証は SDK のクレデンシャルプロバイダに委ね、WIF 実装に差し替えられる構造にする |
+| 運用（#10。`docs/08`） | ログ = Cloud Logging（stdout / stderr とリクエストログ。既定 30 日保持）を `scripts/ops.sh logs\|errors\|requests` で読む。監視 = Cloud Run の標準メトリクス + 5xx のメールアラート（`terraform/gcp/monitoring.tf`。`alert_email` を書くと有効、空なら作らない）。デプロイ = `build-push.sh` → `terraform apply`（`gcloud run deploy` やコンソール編集はしない。次の apply で消える）。ロールバック = 緊急は `ops.sh rollback <REV>`（トラフィック固定。**固定したまま apply しない**: `cloudrun.tf` は traffic を管理しないので新リビジョンに流れない。解除は `ops.sh to-latest`）、正規は `image.auto.tfvars` を前のタグにして apply |
 
 ### 検証アーキテクチャ
 
@@ -76,13 +77,13 @@ CLAUDE.md         このファイル（AI 駆動開発の前提・ルール）
 README.md         リポジトリの概要
 .devcontainer/    Dev Container（docker-compose.yml の app サービスをベース。AWS CLI / Terraform は features、gcloud は Dockerfile の dev ステージ。~/.aws と ~/.config/gcloud は名前付きボリュームで永続化し、AWS の SSO も gcloud の認証もコンテナ内で行う）
 app/              サンプル PHP アプリ（public/, src/, composer.json）
-docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / composer / gcloud CLI）, Apache 設定
+docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / composer / gcloud CLI）, Apache 設定（ServerName localhost で AH00558 を消している。#10）
 docker-compose.yml ローカル起動用
 cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registry へ push（--target runtime。scripts/build-push.sh から実行）
 .gcloudignore     Cloud Build に送らないファイル
-terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state は GCS）
+terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state は GCS）/ 5xx アラート（#10、`alert_email`）
 terraform/aws/    S3 バケット / IAM ロール（信頼ポリシーで Google の SA を指定。権限は s3:PutObject のみ。#6 で作成。state は GCS）
-scripts/          tf-init.sh（state バケットの作成と terraform init）、build-push.sh（Cloud Build）、smoke.sh、fs-check.sh（gcsfuse 読み書きの計測。#7）、update-bench.sh（/update の処理時間と二重送信。#8）、cold-start.sh（アイドル後の初回 TTFB。#9）
+scripts/          tf-init.sh（state バケットの作成と terraform init）、build-push.sh（Cloud Build）、smoke.sh、fs-check.sh（gcsfuse 読み書きの計測。#7）、update-bench.sh（/update の処理時間と二重送信。#8）、cold-start.sh（アイドル後の初回 TTFB。#9）、ops.sh（ログ・リビジョン・切り戻し・アラート確認。#10）
 docs/             検証レポート（検証項目ごとに 1 ファイル）+ 最終判定
 ```
 
@@ -251,6 +252,19 @@ scripts/cold-start.sh image-size                               # Artifact Regist
 # min_instances>=1 の構成は常駐モード（落ちないのでアイドル後の初回をそのまま採用し、待ちを延ばさない。N=5 で約 80 分）
 # gcloud の認証が切れる（十数時間）と再開手順を出して止まる。gcloud auth login --no-launch-browser の後、同じコマンドで続きから追記される
 # 計測中はサービスに触らない（アイドルが途切れる）。min_instances=1 は課金が発生するので終わったら 0 に戻して apply
+```
+
+### 運用（Dev Container 内で実施。詳細は `docs/08`）
+
+```bash
+scripts/ops.sh logs 50            # アプリのログ（stdout + stderr）を時系列で。範囲は FRESHNESS（既定 1d）
+scripts/ops.sh errors 20          # stderr のエラー行と 5xx のリクエスト
+scripts/ops.sh requests 20        # Cloud Run のリクエストログ（ステータス、レイテンシ）
+scripts/ops.sh revisions          # リビジョン（イメージタグ）とトラフィック。固定中は警告
+scripts/ops.sh rollback <REV>     # 緊急の切り戻し（トラフィックを 100% そのリビジョンへ）
+scripts/ops.sh to-latest          # 切り戻しの解除。terraform apply の前に必ず戻す
+echo 'alert_email = "<address>"' >> terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply   # 5xx アラートを有効化
+scripts/ops.sh alert-test 3       # 500 を 3 回出してアラートを確認（fs_check = true の間だけ。無効なら 404 で止まる）
 ```
 
 ### AWS（Dev Container 内で実施。詳細は `docs/04`）
