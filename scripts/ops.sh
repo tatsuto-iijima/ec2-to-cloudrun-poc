@@ -7,7 +7,8 @@
 #                       新しい方から N 件（既定 50）取り、時系列で表示する
 #   errors [N]          エラーだけ: stderr の "error " / "PHP Fatal" / "PHP Warning" 行と、5xx を返したリクエスト
 #   requests [N]        Cloud Run のリクエストログ（時刻、ステータス、レイテンシ、メソッド、URL）
-#   revisions           リビジョン一覧（作成時刻、イメージのタグ）と現在のトラフィック配分
+#   revisions [N]       新しい方から N 件（既定 10）のリビジョン（作成時刻、イメージのタグ）と現在のトラフィック配分。
+#                       Cloud Run はイメージをダイジェストで記録するので、Artifact Registry からタグ（= コミットの短縮 SHA）を引く
 #   rollback REVISION   緊急の切り戻し: トラフィックを 100% そのリビジョンへ（Terraform の外の操作。解除は to-latest）
 #   to-latest           切り戻しの解除: トラフィックを最新リビジョンへ戻す（次の terraform apply の前に必ず戻す）
 #   alert-test [N]      5xx アラートの動作確認: POST /fs-check case=alert-test を N 回（既定 3）投げて 500 を出す
@@ -61,14 +62,28 @@ requests() {
 }
 
 revisions() {
-  local s
+  local n="${1:-10}" s image images
   s=$(svc)
-  echo "== リビジョン（新しい順）"
-  gcloud run revisions list --service "$s" --region "$REGION" --format=json \
-    | php -r '
+  # ダイジェスト → タグの対応表。引けなければ空（ダイジェストの短縮表示になる）
+  image=$(terraform -chdir=terraform/gcp output -raw image_uri 2>/dev/null) || image=""
+  images="[]"
+  if [[ -n "$image" && "$image" != *$'\n'* ]]; then
+    images=$(gcloud artifacts docker images list "$image" --include-tags --format=json 2>/dev/null) || images="[]"
+  fi
+  echo "== リビジョン（新しい順に $n 件）"
+  gcloud run revisions list --service "$s" --region "$REGION" --limit "$n" --format=json \
+    | IMAGES="$images" php -r '
+        $tags = [];
+        foreach (json_decode((string) getenv("IMAGES"), true) ?: [] as $i) {
+          $t = $i["tags"] ?? [];
+          $t = is_array($t) ? $t : array_filter(explode(",", (string) $t));
+          if ($t !== [] && isset($i["version"])) { $tags[$i["version"]] = implode(",", $t); }
+        }
         foreach (json_decode(stream_get_contents(STDIN), true) ?: [] as $r) {
-          $img = $r["spec"]["containers"][0]["image"] ?? "";
-          printf("  %-24s %s  %s\n", $r["metadata"]["name"] ?? "?", substr((string) ($r["metadata"]["creationTimestamp"] ?? ""), 0, 16), basename($img));
+          $img = (string) ($r["spec"]["containers"][0]["image"] ?? "");
+          $digest = str_contains($img, "@") ? substr($img, strpos($img, "@") + 1) : "";
+          $label = $digest === "" ? basename($img) : (isset($tags[$digest]) ? "tag=" . $tags[$digest] : substr($digest, 0, 19));
+          printf("  %-24s %s  %s\n", $r["metadata"]["name"] ?? "?", substr((string) ($r["metadata"]["creationTimestamp"] ?? ""), 0, 16), $label);
         }'
   echo "== トラフィック"
   gcloud run services describe "$s" --region "$REGION" --format=json \
@@ -79,6 +94,7 @@ revisions() {
         }
         $fixed = array_filter($d["spec"]["traffic"] ?? [], fn($t) => empty($t["latestRevision"]) && ($t["percent"] ?? 0) > 0);
         if ($fixed) { echo "  注意: トラフィックが特定のリビジョンに固定されています。次の terraform apply の前に scripts/ops.sh to-latest で戻してください\n"; }'
+  echo "（リビジョンは設定も含む。戻す前に gcloud run revisions describe <REV> --region $REGION で環境変数を確認）"
 }
 
 rollback() {
@@ -117,9 +133,9 @@ case "$cmd" in
   logs) logs "$@" ;;
   errors) errors "$@" ;;
   requests) requests "$@" ;;
-  revisions) revisions ;;
+  revisions) revisions "$@" ;;
   rollback) rollback "$@" ;;
   to-latest) to_latest ;;
   alert-test) alert_test "$@" ;;
-  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2 ;;
 esac
