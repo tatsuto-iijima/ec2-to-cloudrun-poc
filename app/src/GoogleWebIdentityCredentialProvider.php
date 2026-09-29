@@ -64,7 +64,7 @@ final class GoogleWebIdentityCredentialProvider
         $credentials = $this->assumeRole($this->fetchIdToken());
         $this->writeCache($credentials);
 
-        error_log(sprintf(
+        Log::write(sprintf(
             'wif: credentials refreshed role=%s expires=%s',
             $this->config->awsRoleArn,
             gmdate(DATE_ATOM, (int) $credentials->getExpiration())
@@ -192,7 +192,7 @@ final class GoogleWebIdentityCredentialProvider
 
         if (@file_put_contents($tmp, $json) === false || !@chmod($tmp, 0600) || !@rename($tmp, $this->cacheFile)) {
             @unlink($tmp);
-            error_log(sprintf('wif: credentials cache write failed: %s', $this->cacheFile));
+            Log::write(sprintf('wif: credentials cache write failed: %s', $this->cacheFile));
         }
     }
 

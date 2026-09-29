@@ -19,6 +19,7 @@ use App\FsCheck;
 use App\GoogleWebIdentityCredentialProvider;
 use App\InstanceInfo;
 use App\JsonStore;
+use App\Log;
 use App\S3Uploader;
 use App\Updater;
 
@@ -67,7 +68,7 @@ try {
         $uploader = new S3Uploader($config, $credentials);
         $r = (new Updater($config, $store, $uploader))->update($key, $value);
 
-        error_log(sprintf(
+        Log::write(sprintf(
             'update key=%s mode=%s lock=%.1fms read=%.1fms write=%.1fms put=%.1fms bytes=%d counter=%d target=%s etag=%s',
             $key,
             $config->writeMode,
@@ -98,7 +99,7 @@ try {
         $params = array_map(static fn (mixed $v): string => (string) $v, $_POST);
         $case = $params['case'] ?? 'info';
         $result = (new FsCheck($config))->run($case, $params);
-        error_log(sprintf('fs-check case=%s ok=%s total=%.1fms', $case, $result['ok'] ? 'true' : 'false', $result['total_ms']));
+        Log::write(sprintf('fs-check case=%s ok=%s total=%.1fms', $case, $result['ok'] ? 'true' : 'false', $result['total_ms']));
         header('Content-Type: application/json');
         echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
         exit;
@@ -109,7 +110,7 @@ try {
     echo "Not Found\n";
 } catch (Throwable $e) {
     // 失敗内容はログに残し、画面には要約だけ出す
-    error_log(sprintf('error %s: %s', $e::class, $e->getMessage()));
+    Log::write(sprintf('error %s: %s', $e::class, $e->getMessage()));
     http_response_code(500);
     header('Content-Type: text/plain; charset=utf-8');
     echo 'Internal Server Error: ' . $e->getMessage() . "\n";
