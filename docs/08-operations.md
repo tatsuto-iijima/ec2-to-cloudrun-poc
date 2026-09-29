@@ -5,10 +5,10 @@
 
 ## 1. 結論
 
-**ログ・監視・デプロイ・ロールバックはすべて Cloud Run の標準機能と、このリポジトリのスクリプト（`scripts/build-push.sh`、`scripts/ops.sh`）+ Terraform で手順化できる。EC2 に比べて運用で触るものは減る**（OS・Apache のパッチ、logrotate、ディスク監視、SSH 鍵の管理が無くなる）。実機（2026-09-29）でデプロイ → ログ確認 → 5xx の発生と検索 → 緊急の切り戻し → 解除までを通した（§9）。
+**ログ・監視・デプロイ・ロールバックはすべて Cloud Run の標準機能と、このリポジトリのスクリプト（`scripts/build-push.sh`、`scripts/ops.sh`）+ Terraform で手順化できる。EC2 に比べて運用で触るものは減る**（OS・Apache のパッチ、logrotate、ディスク監視、SSH 鍵の管理が無くなる）。実機（2026-09-29）でデプロイ → ログ確認 → 5xx の発生と検索 → アラートのメール → 緊急の切り戻し → 解除までを通した。実測はデプロイ（`build-push.sh` → `apply`）約 1 分 40 秒、5xx からアラートのメールまで約 2 分、切り戻しは数秒（§9）。
 
 - **ログ**: Apache の access / error ログとアプリのログ（`App\Log`）は stdout / stderr に出すだけで Cloud Logging に集まる（#5〜#9 で確認済み）。アプリのログは Apache を経由させない（経由すると日本語が `\xNN` にエスケープされて読めない。§2.1）。`scripts/ops.sh logs` / `errors` / `requests` で読む。保持は既定 30 日。延長とエクスポートはコマンド 1〜2 本（§2）
-- **監視**: リクエスト数・レイテンシ・インスタンス数・CPU / メモリ・起動レイテンシは Cloud Run が自動で送る（設定不要）。アラートは「5 分間に 5xx が 1 回以上 → メール」を Terraform に入れた（`alert_email` を書くと有効。§3）
+- **監視**: リクエスト数・レイテンシ・インスタンス数・CPU / メモリ・起動レイテンシは Cloud Run が自動で送る（設定不要）。アラートは「5 分間に 5xx が 1 回以上 → メール」を Terraform に入れた（`alert_email` を書くと有効。実機では 5xx から約 2 分でメールが届いた。§3）
 - **デプロイ**: `scripts/build-push.sh`（Cloud Build でビルド → Artifact Registry）→ `terraform apply`。新リビジョンへの切り替えは Cloud Run が行い、無停止（§4）
 - **ロールバック**: 緊急時は `scripts/ops.sh rollback <リビジョン>` で数秒で切り戻せる（ビルド不要）。正規の手順は前のイメージタグで `terraform apply`（§5）
 - **移行コスト**: 習得に約 3〜4 人日、運用の整備（アラート・ログ保持・手順書）に約 1.5〜2 人日、デプロイの自動化まで含めると約 3 人日（§7）。EC2 の現行運用の列は一般的な EC2 運用を仮置きしており、**実際の運用に合わせた訂正が必要**
@@ -111,7 +111,7 @@ EC2 の CloudWatch で見ていた「ディスク使用率」「StatusCheckFaile
 | 自動クローズ | 5xx が止まってから 30 分 |
 | 本文（documentation） | 確認手順: `scripts/ops.sh errors` → 直前のデプロイが原因なら `scripts/ops.sh rollback` → 本レポート |
 
-一人で操作するアプリなので、閾値は「1 回でも 5xx が出たら知らせる」にした。`POST /update` が失敗する主な原因（S3 の認証・権限、gcsfuse の書き込み失敗、例外）はすべて 500 になるので、この 1 本で拾える。利用者本人が画面でエラーを見ているので、アラートは「後から原因を追うきっかけ」の位置づけ。
+一人で操作するアプリなので、閾値は「1 回でも 5xx が出たら知らせる」にした。`POST /update` が失敗する主な原因（S3 の認証・権限、gcsfuse の書き込み失敗、例外）はすべて 500 になるので、この 1 本で拾える。利用者本人が画面でエラーを見ているので、アラートは「後から原因を追うきっかけ」の位置づけ。実機では 5xx を出してから**約 2 分**でメールが届いた（§9）。
 
 入れていないもの（理由）:
 
@@ -125,7 +125,7 @@ EC2 の CloudWatch で見ていた「ディスク使用率」「StatusCheckFaile
 ```bash
 grep -q '^fs_check' terraform/gcp/terraform.tfvars || echo 'fs_check = true' >> terraform/gcp/terraform.tfvars
 terraform -chdir=terraform/gcp apply
-scripts/ops.sh alert-test 3       # 500 を 3 回。数分でメールが届く
+scripts/ops.sh alert-test 3       # 500 を 3 回。約 2 分でメールが届く（実機）
 scripts/ops.sh errors 10          # 5xx と "error InvalidArgumentException: 未知の case です: alert-test" が見える
 sed -i '/^fs_check/d' terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply
 ```
@@ -143,6 +143,7 @@ BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url) DATA_DIR= S3_
   S3_BUCKET=$(terraform -chdir=terraform/aws output -raw bucket_name) scripts/smoke.sh
 ```
 
+- **所要時間**: 実機で約 1 分 40 秒（Cloud Build のビルドと push、`apply` で新リビジョンが 100% になるまで）
 - **無停止**: 新リビジョンの起動プローブ（`GET /health`）が通ってからトラフィックが切り替わる。起動に失敗したリビジョンにはトラフィックが流れず、前のリビジョンのまま（`apply` はエラーで終わる）
 - **設定だけの変更**（環境変数、`min_instances`、`cpu` / `memory` など）も `terraform.tfvars` を直して `apply` するだけ。これも新リビジョンになる
 - デプロイ直後の最初のリクエストは、新しいインスタンスの初回なので少し遅い（+約 1 秒。docs/06）
@@ -208,7 +209,7 @@ scripts/build-push.sh && terraform -chdir=terraform/gcp apply
 | ログの確認 | `/var/log/httpd/*.log` を `tail` / `grep` | Cloud Logging（`ops.sh logs` / `errors` / `requests`、Logs Explorer） | コマンドが変わる。logrotate・ログ用ディスクの管理が不要に |
 | ログの保持 | logrotate の世代数、ディスク容量次第 | 既定 30 日。延長・エクスポートはコマンド 1〜2 本（§2.3） | 保持要件があれば設定を 1 回 |
 | 監視 | CloudWatch（CPU、StatusCheckFailed、ディスク） | Cloud Run の標準メトリクス + 5xx アラート（§3） | アラートを作り直す（Terraform 化済み）。ディスク・ホスト監視は不要に |
-| デプロイ | SSH して `git pull` / `rsync`、必要なら Apache 再起動 | `build-push.sh` → `terraform apply`。新リビジョンに無停止で切り替え（§4） | コンテナイメージのビルドが入る（Cloud Build で数分） |
+| デプロイ | SSH して `git pull` / `rsync`、必要なら Apache 再起動 | `build-push.sh` → `terraform apply`。新リビジョンに無停止で切り替え（§4） | コンテナイメージのビルドが入る（`build-push.sh` → `apply` で約 1 分 40 秒。実測） |
 | ロールバック | 前のファイルに戻す（`git checkout` など）。手作業 | `ops.sh rollback`（数秒）または前のタグで `apply`（§5） | 速く、確実になる |
 | OS・ミドルウェアのパッチ | `yum` / `dnf update`、再起動 | ホスト OS は Google が管理。Apache / PHP はベースイメージ（`php:8.3-apache`）を更新して再ビルド → デプロイ | **定期的な再ビルド**（例: 月 1 回、`build-push.sh` → `apply`）の運用を決める |
 | 定期実行（cron） | crontab | 無い。必要なら Cloud Scheduler + HTTP、または Cloud Run jobs | 現行で cron を使っているか要確認（使っていれば移行対象） |
@@ -258,8 +259,8 @@ EC2 と Apache/PHP の運用経験はあり、GCP・コンテナ・Terraform は
 | `ops.sh` の各サブコマンド（偽の `gcloud` / `terraform` を PATH に置いて実行） | `logs` / `errors` / `requests` は正しいフィルタで `gcloud logging read --order=desc` を呼び、時系列に並べ直す。`revisions N` は `--limit N` で取り、ダイジェストを Artifact Registry のタグに引き当てて表示する（`tags` が配列でも文字列でも可。引けなければダイジェストの先頭、`terraform output image_uri` の失敗時は Artifact Registry を呼ばない）。トラフィックを表示し、固定中は警告を出す。`rollback` / `to-latest` は `update-traffic` に正しい引数を渡す。`rollback` の引数なしは使い方を出して終了コード 2。`terraform output` の失敗時はメッセージを出して終了コード 1 |
 | `ops.sh alert-test`（PHP 内蔵サーバー） | `FS_CHECK=1` で 500 が N 回、stderr に `error InvalidArgumentException: 未知の case です: alert-test`。`FS_CHECK` なしでは 404 を検出して案内を出し、終了コード 1 |
 | `scripts/smoke.sh`（PHP 内蔵サーバー + moto。回帰） | ALL PASS |
-| `App\Log`（PHP 内蔵サーバー、実機の結果を受けた修正後） | stderr に `error InvalidArgumentException: 未知の case です: alert-test` と `update key=smoke mode=lock ...` が UTF-8 のまま 1 行で出る。mod_php（Apache）で fd 2 に届くことは Docker が無いため未確認 → 実機で確認（§9） |
-| Apache の `ServerName`（`docker/apache/servername.conf`） | この環境では Docker が使えないため未確認 → 実機で消えたことを確認（§9） |
+| `App\Log`（PHP 内蔵サーバー、実機の結果を受けた修正後） | stderr に `error InvalidArgumentException: 未知の case です: alert-test` と `update key=smoke mode=lock ...` が UTF-8 のまま 1 行で出る。mod_php（Apache）で fd 2 に届くことは実機で確認（§9） |
+| Apache の `ServerName`（`docker/apache/servername.conf`） | この環境では Docker が使えないので実機で確認（§9。AH00558 が消えた） |
 
 ## 9. 実機での確認結果
 
@@ -280,7 +281,7 @@ scripts/ops.sh requests 10
 echo 'alert_email = "<自分のアドレス>"' >> terraform/gcp/terraform.tfvars
 grep -q '^fs_check' terraform/gcp/terraform.tfvars || echo 'fs_check = true' >> terraform/gcp/terraform.tfvars
 terraform -chdir=terraform/gcp apply
-scripts/ops.sh alert-test 3   # 数分でメール
+scripts/ops.sh alert-test 3   # 約 2 分でメール
 scripts/ops.sh errors 10
 sed -i '/^fs_check/d' terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply
 
@@ -294,26 +295,35 @@ scripts/ops.sh to-latest && scripts/ops.sh revisions
 
 | 確認内容 | 結果 |
 |---|---|
-| デプロイ（`build-push.sh` → `apply`） | 新リビジョン `poc-app-00021-5dz` が 100%（最新に追従）。所要時間は（記入欄） |
+| デプロイ（`build-push.sh` → `apply`） | 新リビジョン `poc-app-00021-5dz` が 100%（最新に追従）。所要時間は約 1 分 40 秒 |
 | AH00558 | 旧イメージの `poc-app-00020-qf8` の起動では 2 行出ていて、新イメージの `00021` 以降の起動では出ない。**`ServerName` で消えた** |
 | `ops.sh logs 20` | access ログ（`169.254.169.126 - - [...] "GET / HTTP/1.1" 200 ...`）、Apache の起動・`SIGTERM` での停止がリビジョン名付き・時系列で読める |
 | `ops.sh requests 10` | 時刻、ステータス、レイテンシ（`GET /` 0.06〜0.07 秒、`/health` 2ms 前後）、メソッド、URL |
 | `ops.sh alert-test 3` | 500 × 3（`fs_check = true` で作った `poc-app-00022-p88`） |
 | `ops.sh errors 10` | 5xx のリクエストと `error InvalidArgumentException: ...` の行が交互に出る。**日本語が `\xNN` にエスケープされていた** → `App\Log` で修正（つまずいた点 1） |
-| アラートのメール | （記入欄: 届くまでの時間、内容） |
+| アラートのメール | 5xx を出してから約 2 分で届いた |
 | `ops.sh rollback poc-app-00022-p88` | 数秒で `Traffic: 100% poc-app-00022-p88`。`revisions` は「（固定）」と警告を表示 |
 | 切り戻し中の `smoke.sh`（Cloud Run + 実 S3） | ALL PASS |
 | `ops.sh to-latest` | `100% LATEST (currently poc-app-00023-rss)`、`revisions` は「（最新に追従）」 |
 | `revisions` のイメージ欄 | タグではなく `app@sha256:...`（Cloud Run はダイジェストで記録する）。23 件すべて出て長い → タグの引き当てと件数指定（既定 10）を追加（§5.1） |
+
+修正（`App\Log`、`revisions` のタグ表示）後の再確認（同日、イメージ `3072f74`）:
+
+| 確認内容 | 結果 |
+|---|---|
+| `ops.sh errors 5` | 旧イメージ `8f639b2` の `poc-app-00024-6ql` は従来どおり `[php:notice] ... \xe6\x9c\xaa...`。新イメージの `poc-app-00027-mzj` は `error InvalidArgumentException: 未知の case です: alert-test` と**日本語のまま読める**（Apache の接頭辞なし）。mod_php から `php://stderr` でコンテナの stderr に届いている |
+| `ops.sh revisions 5` | `tag=3072f74,latest`（00026〜00028）、`tag=8f639b2`（00024〜00025）とタグが出る。同じイメージで設定だけ違うリビジョン（`fs_check` の有効化・無効化）が並ぶ |
+| `smoke.sh`（Cloud Run + 実 S3） | ALL PASS |
+| `ops.sh logs 10` | `wif: credentials refreshed role=arn:aws:iam::<ACCOUNT>:role/poc-cloudrun-s3-upload expires=...` と `update key=smoke mode=lock lock=0.0ms read=0.6ms write=187.9ms put=504.1ms ...` が `App\Log` 経由で 1 行ずつ出る（新リビジョンの初回なので put に WIF の取得を含む） |
 
 ### つまずいた点 1: `ops.sh errors` の日本語が `\xe6\x9c\xaa...` になる（2026-09-29）
 
 - **症状**: `error InvalidArgumentException: \xe6\x9c\xaa\xe7\x9f\xa5\xe3\x81\xae case \xe3\x81\xa7\xe3\x81\x99: alert-test`（「未知の case です」）。行頭に `[php:notice] [pid 21:tid 21] [client ...]` が付く
 - **原因**: PHP の `error_log()` は mod_php では Apache の `ap_log_rerror` に渡され、Apache 2.4 はエラーログの本文の非 ASCII・制御文字を `\xNN` にエスケープする（ログの改ざん対策。ビルド時の既定で、`ErrorLogFormat` などの設定では変えられない）。ローカルの PHP 内蔵サーバーは Apache を通らないので再現しなかった
 - **対処**: `app/src/Log.php` を追加し、アプリのログは `php://stderr` に直接書く（`index.php` と `GoogleWebIdentityCredentialProvider.php` の `error_log()` を置き換え）。`php://stderr` は Apache の子プロセスの fd 2（Apache が起動時に root で開いたコンテナの stderr）を複製するだけなので、`www-data` でも書ける。書けなかったときは `error_log()` に戻す
-- **確認（実機）**: `build-push.sh` → `apply` の後、`fs_check = true` で `scripts/ops.sh alert-test 1` → `scripts/ops.sh errors 5` で `未知の case です` が読めること
+- **確認（実機、2026-09-29）**: `build-push.sh` → `apply` の後、`fs_check = true` で `scripts/ops.sh alert-test 1` → `scripts/ops.sh errors 5`。新イメージのリビジョンでは `error InvalidArgumentException: 未知の case です: alert-test` と読めた（上の再確認の表）
 
 ## 10. #11 / #12 への引き継ぎ
 
-- **#11（コスト）**: 運用面で追加されるのは Cloud Logging（無料枠内の見込み。保持を延長するなら保存量に応じた課金）と Cloud Monitoring のアラート（条件 1 本。料金表で確認）。`container/billable_instance_time` は実績の課金時間の確認に使える。EC2 側の運用工数（パッチ適用など）の削減は金額換算するなら人件費として扱う
-- **#12（最終判定）**: 運用面は「移行可能」。条件は、(1) 変更を Terraform 経由に限る運用ルール（§6）、(2) ベースイメージの定期再ビルド、(3) 利用者のアクセス方法の変更（`gcloud run services proxy`、または IAP 等の追加）。移行コストは §7.2（習得 約 3〜4 人日 + 整備 約 1.5〜3 人日）
+- **#11（コスト）**: 運用面で追加されるのは Cloud Logging（無料枠内の見込み。保持を延長するなら保存量に応じた課金）と Cloud Monitoring のアラート（条件 1 本。料金表で確認）。`container/billable_instance_time` は実績の課金時間の確認に使える。デプロイ 1 回は Cloud Build 約 1 分 40 秒以内（ビルド時間の無料枠の範囲か #11 で確認）。EC2 側の運用工数（パッチ適用など）の削減は金額換算するなら人件費として扱う
+- **#12（最終判定）**: 運用面は「移行可能」。条件は、(1) 変更を Terraform 経由に限る運用ルール（§6）、(2) ベースイメージの定期再ビルド、(3) 利用者のアクセス方法の変更（`gcloud run services proxy`、または IAP 等の追加）。移行コストは §7.2（習得 約 3〜4 人日 + 整備 約 1.5〜3 人日）。実測: デプロイ約 1 分 40 秒、切り戻し数秒、5xx からアラートのメールまで約 2 分。§7.1 の EC2 現行運用の列は仮置きのままなので、#12 までに実際の運用で訂正する
