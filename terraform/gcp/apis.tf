@@ -6,6 +6,7 @@ locals {
     "cloudbuild.googleapis.com",       # イメージのビルド（gcloud builds submit）
     "iam.googleapis.com",              # サービスアカウント
     "storage.googleapis.com",          # Cloud Storage（ボリューム）
+    "monitoring.googleapis.com",       # Cloud Monitoring（アラートポリシー。docs/08）
   ]
 }
 

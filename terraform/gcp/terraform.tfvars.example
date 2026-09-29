@@ -23,5 +23,6 @@ invoker_member = "user:you@example.com"
 # min_instances = 1               # #9 のコールドスタート比較（常時 1 台。課金が発生するので検証中だけ。docs/07）
 # startup_cpu_boost = true        # #9 のコールドスタート比較
 # startup_probe_period_seconds = 1  # #9 の起動プローブ間隔の比較（既定 2）
+# alert_email   = "you@example.com"  # 5xx アラートの通知先（#10。空ならアラートを作らない。docs/08）
 # concurrency   = 80
 # request_timeout = "300s"
