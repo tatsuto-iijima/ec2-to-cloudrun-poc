@@ -5,9 +5,9 @@
 
 ## 1. 結論
 
-**ログ・監視・デプロイ・ロールバックはすべて Cloud Run の標準機能と、このリポジトリのスクリプト（`scripts/build-push.sh`、`scripts/ops.sh`）+ Terraform で手順化できる。EC2 に比べて運用で触るものは減る**（OS・Apache のパッチ、logrotate、ディスク監視、SSH 鍵の管理が無くなる）。実機での手順の確認結果は §9（記入欄）。
+**ログ・監視・デプロイ・ロールバックはすべて Cloud Run の標準機能と、このリポジトリのスクリプト（`scripts/build-push.sh`、`scripts/ops.sh`）+ Terraform で手順化できる。EC2 に比べて運用で触るものは減る**（OS・Apache のパッチ、logrotate、ディスク監視、SSH 鍵の管理が無くなる）。実機（2026-09-29）でデプロイ → ログ確認 → 5xx の発生と検索 → 緊急の切り戻し → 解除までを通した（§9）。
 
-- **ログ**: Apache の access / error ログと PHP の `error_log` は stdout / stderr に出すだけで Cloud Logging に集まる（#5〜#9 で確認済み）。`scripts/ops.sh logs` / `errors` / `requests` で読む。保持は既定 30 日。延長とエクスポートはコマンド 1〜2 本（§2）
+- **ログ**: Apache の access / error ログとアプリのログ（`App\Log`）は stdout / stderr に出すだけで Cloud Logging に集まる（#5〜#9 で確認済み）。アプリのログは Apache を経由させない（経由すると日本語が `\xNN` にエスケープされて読めない。§2.1）。`scripts/ops.sh logs` / `errors` / `requests` で読む。保持は既定 30 日。延長とエクスポートはコマンド 1〜2 本（§2）
 - **監視**: リクエスト数・レイテンシ・インスタンス数・CPU / メモリ・起動レイテンシは Cloud Run が自動で送る（設定不要）。アラートは「5 分間に 5xx が 1 回以上 → メール」を Terraform に入れた（`alert_email` を書くと有効。§3）
 - **デプロイ**: `scripts/build-push.sh`（Cloud Build でビルド → Artifact Registry）→ `terraform apply`。新リビジョンへの切り替えは Cloud Run が行い、無停止（§4）
 - **ロールバック**: 緊急時は `scripts/ops.sh rollback <リビジョン>` で数秒で切り戻せる（ビルド不要）。正規の手順は前のイメージタグで `terraform apply`（§5）
@@ -20,12 +20,14 @@
 | 出どころ | 出力先（コンテナ） | Cloud Logging のログ名 | 内容 |
 |---|---|---|---|
 | Apache の access ログ | stdout（`CustomLog /proc/self/fd/1 combined`） | `run.googleapis.com/stdout` | combined 形式の 1 行 |
-| Apache の error ログ、PHP の `error_log` | stderr（`ErrorLog /proc/self/fd/2`） | `run.googleapis.com/stderr` | `update key=... read=...ms write=...ms put=...ms`（`POST /update` ごと）、`error <例外クラス>: <メッセージ>`（500 のとき）、PHP の Warning / Fatal |
+| アプリのログ（`app/src/Log.php`） | stderr（`php://stderr` に直接） | `run.googleapis.com/stderr` | `update key=... read=...ms write=...ms put=...ms`（`POST /update` ごと）、`error <例外クラス>: <メッセージ>`（500 のとき）、`wif: ...`（S3 の一時クレデンシャル取得） |
+| Apache の error ログ | stderr（`ErrorLog /proc/self/fd/2`） | `run.googleapis.com/stderr` | Apache の起動・停止、PHP 自身の Warning / Fatal |
 | Cloud Run のリクエストログ | （Cloud Run が自動で出す） | `run.googleapis.com/requests` | メソッド、URL、ステータス、レイテンシ、応答サイズ、リビジョン。構造化されていて絞り込みやすい |
 | gcsfuse・起動プローブ・インスタンスの起動停止 | （Cloud Run が自動で出す） | `run.googleapis.com/varlog/system` | `File system has been successfully mounted.`、`STARTUP HTTP probe succeeded ...` など（docs/07 §5） |
 
 - **ファイルに書かないので logrotate もディスク監視も要らない**。コンテナ内の `/var/log` は使っていない
 - Apache の access ログと Cloud Run のリクエストログは**同じリクエストを 2 回記録する**。量は少ない（一人で操作）ので PoC では両方残す。本番で気になる場合は `CustomLog` を外すか、ログの除外フィルタで stdout の access ログを捨てる（リクエストログの方が構造化されていて検索しやすい）
+- **アプリのログは Apache を経由させない**。PHP の `error_log()` は mod_php では Apache の error ログに渡され、Apache 2.4 は本文の非 ASCII を `\xNN` にエスケープする（ビルド時の既定で、設定では変えられない）。実機では例外メッセージが `error InvalidArgumentException: \xe6\x9c\xaa\xe7\x9f\xa5... case \xe3\x81\xa7\xe3\x81\x99: alert-test` となり読めなかった（§9 つまずいた点 1）。そこで `App\Log::write()` が `php://stderr`（Apache が起動時に開いたコンテナの stderr を複製した fd）に 1 行で直接書く。行の文言は従来どおりなので、`textPayload:"update key="` などの検索はそのまま使える。Apache の接頭辞（`[php:notice] [pid ...] [client ...]`）は付かない（時刻は Cloud Logging が付ける）。EC2 の現行アプリも `error_log()` なら同じエスケープが起きているはずで、移行時に `error_log()` を置き換えるかは現行の読み方次第
 - 起動時の `AH00558: Could not reliably determine the server's fully qualified domain name` は、本 Issue で `ServerName localhost`（`docker/apache/servername.conf`）を入れて出ないようにした。エラーを探すときの雑音を減らすため（docs/03 §6 の持ち越し）
 
 ### 2.2 検索
@@ -160,12 +162,13 @@ BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url) DATA_DIR= S3_
 ### 5.1 正規の手順（Terraform で前のイメージに戻す）
 
 ```bash
-scripts/ops.sh revisions                       # 各リビジョンのイメージタグ（= コミットの短縮 SHA）が見える
+scripts/ops.sh revisions 20                    # 各リビジョンのイメージタグ（tag=<コミットの短縮 SHA>）が見える
 # image.auto.tfvars を 1 つ前のタグに書き換える（build-push.sh が次に上書きするまでこの値のまま）
 sed -i 's|:[0-9a-f]*"$|:<前のタグ>"|' terraform/gcp/image.auto.tfvars
 terraform -chdir=terraform/gcp apply
 ```
 
+- Cloud Run はリビジョン作成時にタグをダイジェスト（`app@sha256:...`）に解決して記録する。`ops.sh revisions` は Artifact Registry のタグ一覧と突き合わせてタグを表示する（引けないときはダイジェストの先頭）
 - イメージは Artifact Registry に残っているので、再ビルドは要らない。押したタグの一覧は `gcloud artifacts docker images list $(terraform -chdir=terraform/gcp output -raw image_uri) --include-tags`
 - Terraform の定義とも一致するので、この後に `apply` しても戻らない
 
@@ -181,6 +184,7 @@ scripts/build-push.sh && terraform -chdir=terraform/gcp apply
 
 - Cloud Run は過去のリビジョン（イメージと設定の組）を保持しているので、トラフィックを向け直すだけで戻る。`min 0` なので戻した先のリビジョンでは初回がコールドスタートになる（約 2.3 秒）
 - **注意: 固定したまま `terraform apply` しない**。`cloudrun.tf` はトラフィックを管理していない（`traffic` ブロックが無い）ので、`apply` しても固定は外れず、新しく作られたリビジョンにトラフィックが流れない（直したつもりの版が使われない）。`scripts/ops.sh revisions` は固定中に警告を出す
+- **リビジョンはイメージと設定の組**。戻すと、そのリビジョンを作ったときの環境変数やスケーリング設定も戻る。実機で戻した先の `poc-app-00022-p88` は `fs_check = true` で作ったリビジョンで、切り戻し中は診断経路 `/fs-check` が有効だった（00021〜00023 は同じイメージで、00022 = fs_check 有効化、00023 = 無効化）。`ops.sh revisions` だけでは設定の違いが見えないので、戻す前に `gcloud run revisions describe <REV> --region asia-northeast1` で環境変数を確認する。設定を変えるたびにリビジョンが増える（実機では 1 日で 3 つ）ので、「1 つ前」が直前のイメージとは限らない
 - 設定（環境変数など）の変更で壊れた場合も同じ手順で戻せる。ただし **データ（`data.json`、S3 のオブジェクト）は戻らない**。リビジョンを戻すのはアプリと設定だけ
 
 ## 6. Terraform 管理の線引き
@@ -251,14 +255,15 @@ EC2 と Apache/PHP の運用経験はあり、GCP・コンテナ・Terraform は
 |---|---|
 | `terraform fmt -check` / `validate`（`monitoring.tf`、`alert_email`） | OK（google provider 8.2.0） |
 | `bash -n scripts/ops.sh` | OK |
-| `ops.sh` の各サブコマンド（偽の `gcloud` / `terraform` を PATH に置いて実行） | `logs` / `errors` / `requests` は正しいフィルタで `gcloud logging read --order=desc` を呼び、時系列に並べ直す。`revisions` はリビジョン名・作成時刻・イメージタグとトラフィックを表示し、固定中は警告を出す。`rollback` / `to-latest` は `update-traffic` に正しい引数を渡す。`rollback` の引数なしは使い方を出して終了コード 2。`terraform output` の失敗時はメッセージを出して終了コード 1 |
+| `ops.sh` の各サブコマンド（偽の `gcloud` / `terraform` を PATH に置いて実行） | `logs` / `errors` / `requests` は正しいフィルタで `gcloud logging read --order=desc` を呼び、時系列に並べ直す。`revisions N` は `--limit N` で取り、ダイジェストを Artifact Registry のタグに引き当てて表示する（`tags` が配列でも文字列でも可。引けなければダイジェストの先頭、`terraform output image_uri` の失敗時は Artifact Registry を呼ばない）。トラフィックを表示し、固定中は警告を出す。`rollback` / `to-latest` は `update-traffic` に正しい引数を渡す。`rollback` の引数なしは使い方を出して終了コード 2。`terraform output` の失敗時はメッセージを出して終了コード 1 |
 | `ops.sh alert-test`（PHP 内蔵サーバー） | `FS_CHECK=1` で 500 が N 回、stderr に `error InvalidArgumentException: 未知の case です: alert-test`。`FS_CHECK` なしでは 404 を検出して案内を出し、終了コード 1 |
 | `scripts/smoke.sh`（PHP 内蔵サーバー + moto。回帰） | ALL PASS |
-| Apache の `ServerName`（`docker/apache/servername.conf`） | この環境では Docker が使えないため未確認。実機で起動ログから AH00558 が消えることを確認する（§9） |
+| `App\Log`（PHP 内蔵サーバー、実機の結果を受けた修正後） | stderr に `error InvalidArgumentException: 未知の case です: alert-test` と `update key=smoke mode=lock ...` が UTF-8 のまま 1 行で出る。mod_php（Apache）で fd 2 に届くことは Docker が無いため未確認 → 実機で確認（§9） |
+| Apache の `ServerName`（`docker/apache/servername.conf`） | この環境では Docker が使えないため未確認 → 実機で消えたことを確認（§9） |
 
 ## 9. 実機での確認結果
 
-（記入欄。Dev Container から次を実行し、結果を PR に貼ってもらう）
+2026-09-29、Dev Container から次を実行（PR #21 のコメント）。
 
 ```bash
 export BASE_URL=$(terraform -chdir=terraform/gcp output -raw service_url)
@@ -289,11 +294,24 @@ scripts/ops.sh to-latest && scripts/ops.sh revisions
 
 | 確認内容 | 結果 |
 |---|---|
-| デプロイ（`build-push.sh` → `apply`）の所要時間 | |
-| `ops.sh logs` / `requests` の見え方、AH00558 の有無 | |
-| アラートのメールが届くまでの時間、メールの内容 | |
-| `ops.sh rollback` の所要時間、切り戻し中の `smoke.sh` | |
-| `to-latest` 後のトラフィック | |
+| デプロイ（`build-push.sh` → `apply`） | 新リビジョン `poc-app-00021-5dz` が 100%（最新に追従）。所要時間は（記入欄） |
+| AH00558 | 旧イメージの `poc-app-00020-qf8` の起動では 2 行出ていて、新イメージの `00021` 以降の起動では出ない。**`ServerName` で消えた** |
+| `ops.sh logs 20` | access ログ（`169.254.169.126 - - [...] "GET / HTTP/1.1" 200 ...`）、Apache の起動・`SIGTERM` での停止がリビジョン名付き・時系列で読める |
+| `ops.sh requests 10` | 時刻、ステータス、レイテンシ（`GET /` 0.06〜0.07 秒、`/health` 2ms 前後）、メソッド、URL |
+| `ops.sh alert-test 3` | 500 × 3（`fs_check = true` で作った `poc-app-00022-p88`） |
+| `ops.sh errors 10` | 5xx のリクエストと `error InvalidArgumentException: ...` の行が交互に出る。**日本語が `\xNN` にエスケープされていた** → `App\Log` で修正（つまずいた点 1） |
+| アラートのメール | （記入欄: 届くまでの時間、内容） |
+| `ops.sh rollback poc-app-00022-p88` | 数秒で `Traffic: 100% poc-app-00022-p88`。`revisions` は「（固定）」と警告を表示 |
+| 切り戻し中の `smoke.sh`（Cloud Run + 実 S3） | ALL PASS |
+| `ops.sh to-latest` | `100% LATEST (currently poc-app-00023-rss)`、`revisions` は「（最新に追従）」 |
+| `revisions` のイメージ欄 | タグではなく `app@sha256:...`（Cloud Run はダイジェストで記録する）。23 件すべて出て長い → タグの引き当てと件数指定（既定 10）を追加（§5.1） |
+
+### つまずいた点 1: `ops.sh errors` の日本語が `\xe6\x9c\xaa...` になる（2026-09-29）
+
+- **症状**: `error InvalidArgumentException: \xe6\x9c\xaa\xe7\x9f\xa5\xe3\x81\xae case \xe3\x81\xa7\xe3\x81\x99: alert-test`（「未知の case です」）。行頭に `[php:notice] [pid 21:tid 21] [client ...]` が付く
+- **原因**: PHP の `error_log()` は mod_php では Apache の `ap_log_rerror` に渡され、Apache 2.4 はエラーログの本文の非 ASCII・制御文字を `\xNN` にエスケープする（ログの改ざん対策。ビルド時の既定で、`ErrorLogFormat` などの設定では変えられない）。ローカルの PHP 内蔵サーバーは Apache を通らないので再現しなかった
+- **対処**: `app/src/Log.php` を追加し、アプリのログは `php://stderr` に直接書く（`index.php` と `GoogleWebIdentityCredentialProvider.php` の `error_log()` を置き換え）。`php://stderr` は Apache の子プロセスの fd 2（Apache が起動時に root で開いたコンテナの stderr）を複製するだけなので、`www-data` でも書ける。書けなかったときは `error_log()` に戻す
+- **確認（実機）**: `build-push.sh` → `apply` の後、`fs_check = true` で `scripts/ops.sh alert-test 1` → `scripts/ops.sh errors 5` で `未知の case です` が読めること
 
 ## 10. #11 / #12 への引き継ぎ
 
