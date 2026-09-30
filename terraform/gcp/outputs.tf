@@ -42,3 +42,8 @@ output "cold_start_config" {
   description = "コールドスタート計測の構成ラベル（scripts/cold-start.sh が結果に記録する）"
   value       = "min${var.min_instances}-boost${var.startup_cpu_boost ? 1 : 0}${var.startup_probe_period_seconds == 2 ? "" : "-probe${var.startup_probe_period_seconds}"}"
 }
+
+output "alert_policy_name" {
+  description = "5xx アラートポリシーのリソース名（alert_email が空なら null）"
+  value       = local.alert_enabled ? google_monitoring_alert_policy.errors_5xx[0].name : null
+}

@@ -18,6 +18,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 - 単一利用者でも二重送信（ダブルクリック、再読み込み）で同一インスタンス内に並行リクエストが起こりうる。**#8 で決定: アプリ側で直列化する。** `app/src/Updater.php` が `/tmp` のロックファイルを `flock(LOCK_EX)` で握り、read → 更新 → write → S3 PUT までを直列化する（2 回目も順に適用される。拒否はしない）。`concurrency` は 80 のまま。フォームのボタンは送信時に無効化する（`docs/06` §6）
 - **移行対象データ（#3 で確定。詳細は `docs/01-data-inventory-and-gcsfuse-compat.md`）**: 現行アプリがローカル FS に置くのは **JSON マスタファイルのみ**。ローカルがマスターで S3 は配布先。少数ファイル、各 1MB 未満。書き込みは `LOCK_EX` / `flock` を使う
 - **置き場所の決定**: JSON → `/mnt/data`（Cloud Storage ボリューム、`DATA_DIR`）、一時ファイル → `/tmp`（インメモリ。大きなファイルを置かない）、ログ → stdout/stderr、PHP セッションは使わない（必要になったら Cookie ベース）
+- **現行 EC2 の運用（#10 で確認）**: 監視は Apache のログを見るだけ（アラートなし）、デプロイは手動、cron は使っていない、バックアップは EBS のスナップショット、アクセスはセキュリティグループの IP 制限（ブラウザから直接）。Cloud Run でのアクセス制御は A: IAM + `gcloud run services proxy`（本 PoC。追加費用なし）/ B: ロードバランサ + Cloud Armor の IP 許可リスト（現行どおり。月額の固定費あり、`allUsers` の invoker が要る）から #12 で選ぶ（`docs/08` §7.3）。バックアップはバケットのバージョニングで代替（PoC では未設定）
 
 ## 3. 技術選定
 
@@ -30,6 +31,7 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 | S3 認証（主案） | Workload Identity Federation の逆方向。AWS IAM ロールの信頼ポリシーに `accounts.google.com` の Web Identity を設定し、条件キー（`sub` / `aud` = SA の一意 ID、`oaud` = ロール ARN）で Cloud Run のサービスアカウントに限定。PHP 側（`app/src/GoogleWebIdentityCredentialProvider.php`）はメタデータサーバーから ID トークンを取得し STS `AssumeRoleWithWebIdentity` で一時クレデンシャルを得て `/tmp` にキャッシュする。**鍵レス**（#6 で実装。`docs/04`） |
 | S3 認証（代替案） | IAM ユーザーのアクセスキーを Secret Manager に格納して Cloud Run に注入。主案が成立しない場合のみ |
 | S3 クライアント | AWS SDK for PHP。認証は SDK のクレデンシャルプロバイダに委ね、WIF 実装に差し替えられる構造にする |
+| 運用（#10。`docs/08`） | ログ = Cloud Logging（stdout / stderr とリクエストログ。既定 30 日保持）を `scripts/ops.sh logs\|errors\|requests` で読む。**アプリのログは `App\Log::write()`（`php://stderr` に直接）で書き、`error_log()` は使わない**（mod_php では Apache の error ログを経由し、日本語が `\xNN` にエスケープされて読めない。docs/08 つまずいた点 1）。監視 = Cloud Run の標準メトリクス + 5xx のメールアラート（`terraform/gcp/monitoring.tf`。`alert_email` を書くと有効、空なら作らない。実測: 5xx から約 2 分でメール）。デプロイ = `build-push.sh` → `terraform apply`（実測: 約 1 分 40 秒。`gcloud run deploy` やコンソール編集はしない。次の apply で消える）。ロールバック = 緊急は `ops.sh rollback <REV>`（トラフィック固定。**固定したまま apply しない**: `cloudrun.tf` は traffic を管理しないので新リビジョンに流れない。解除は `ops.sh to-latest`）、正規は `image.auto.tfvars` を前のタグにして apply（`ops.sh revisions` がダイジェストからタグを引く。リビジョンは設定も含むので、戻す前に `gcloud run revisions describe` で環境変数を確認） |
 
 ### 検証アーキテクチャ
 
@@ -44,11 +46,11 @@ JSON を更新して AWS S3 にアップロードする Web アプリについ�
 ### サンプルアプリの仕様（最小構成。#4 で実装済み）
 
 - `GET /` : JSON の現在値を表示し、更新フォームを出す
-- `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303（`app/src/Updater.php`。全体を `flock` で直列化し、PUT はファイルのストリームで送る）。各段階の所要時間（ms）を `error_log` に 1 行出し、303 の `Location` にも `read / write / put` を入れる（`scripts/update-bench.sh` が読む）
+- `POST /update` : `DATA_DIR/DATA_FILE` を読み → 更新（`key`/`value`、`counter`、`updated_at`）→ 書き戻し → S3 へ PUT → `/` へ 303（`app/src/Updater.php`。全体を `flock` で直列化し、PUT はファイルのストリームで送る）。各段階の所要時間（ms）を `Log::write` で stderr に 1 行出し、303 の `Location` にも `read / write / put` を入れる（`scripts/update-bench.sh` が読む）
 - `POST /fs-check` : gcsfuse 検証用の診断（Issue #7、`docs/05`）。**`FS_CHECK=1` のときだけ有効**（無効時は 404）。`DATA_DIR/fs-check/` 配下で `case`（`rmw` / `rename` / `lock` / `append` / `size` など）を実行して所要時間と戻り値を JSON で返す。`case=pad` だけは `data.json` 本体に埋め草を入れる（#8 のサイズ別計測用）。`scripts/fs-check.sh` / `scripts/update-bench.sh` から呼ぶ
 - 全応答に `X-Instance-Id`（`/tmp/instance-id` の乱数。インスタンスが入れ替わると変わる）と `X-Instance-Uptime`（最初のリクエストからの秒数）を付ける（`app/src/InstanceInfo.php`。コールドスタート判定に使う。`docs/07`）
 - `GET /health` : `{"status":"ok"}` を返す。ファイルにも S3 にも触らない（コールドスタート計測の基準）。**`/healthz` は使わない**: Cloud Run の予約済み URL パス（`/eventlog`、`/_ah/` で始まるパス、**末尾が `z` のパス**）は Google のフロントエンドが横取りして 404 を返し、コンテナに届かない。経路を足すときもこの 3 種は避ける（Cloud Run の既知の問題「予約済みの URL パス」。docs/03 つまずいた点 5）
-- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/Updater.php`（`/update` の本体。flock で直列化）、`app/src/S3Uploader.php`（S3 PUT）、`app/src/GoogleWebIdentityCredentialProvider.php`（WIF の認証）、`app/src/FsCheck.php`（`/fs-check` の診断ロジック）、`app/src/InstanceInfo.php`（インスタンス ID と稼働秒数）、`app/templates/index.php`（画面）
+- コード: `app/public/index.php`（ルーティング）、`app/src/Config.php`（環境変数）、`app/src/JsonStore.php`（読み書き）、`app/src/Updater.php`（`/update` の本体。flock で直列化）、`app/src/S3Uploader.php`（S3 PUT）、`app/src/GoogleWebIdentityCredentialProvider.php`（WIF の認証）、`app/src/FsCheck.php`（`/fs-check` の診断ロジック）、`app/src/InstanceInfo.php`（インスタンス ID と稼働秒数）、`app/src/Log.php`（stderr への 1 行ログ）、`app/templates/index.php`（画面）
 
 | 環境変数 | 既定 | 説明 |
 |---|---|---|
@@ -76,13 +78,13 @@ CLAUDE.md         このファイル（AI 駆動開発の前提・ルール）
 README.md         リポジトリの概要
 .devcontainer/    Dev Container（docker-compose.yml の app サービスをベース。AWS CLI / Terraform は features、gcloud は Dockerfile の dev ステージ。~/.aws と ~/.config/gcloud は名前付きボリュームで永続化し、AWS の SSO も gcloud の認証もコンテナ内で行う）
 app/              サンプル PHP アプリ（public/, src/, composer.json）
-docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / composer / gcloud CLI）, Apache 設定
+docker/           Dockerfile（runtime / dev の 2 ステージ。dev に git / composer / gcloud CLI）, Apache 設定（ServerName localhost で AH00558 を消している。#10）
 docker-compose.yml ローカル起動用
 cloudbuild.yaml   Cloud Build でイメージをビルドして Artifact Registry へ push（--target runtime。scripts/build-push.sh から実行）
 .gcloudignore     Cloud Build に送らないファイル
-terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state は GCS）
+terraform/gcp/    Cloud Run / Cloud Storage / サービスアカウント / Artifact Registry（#5 で作成。state は GCS）/ 5xx アラート（#10、`alert_email`）
 terraform/aws/    S3 バケット / IAM ロール（信頼ポリシーで Google の SA を指定。権限は s3:PutObject のみ。#6 で作成。state は GCS）
-scripts/          tf-init.sh（state バケットの作成と terraform init）、build-push.sh（Cloud Build）、smoke.sh、fs-check.sh（gcsfuse 読み書きの計測。#7）、update-bench.sh（/update の処理時間と二重送信。#8）、cold-start.sh（アイドル後の初回 TTFB。#9）
+scripts/          tf-init.sh（state バケットの作成と terraform init）、build-push.sh（Cloud Build）、smoke.sh、fs-check.sh（gcsfuse 読み書きの計測。#7）、update-bench.sh（/update の処理時間と二重送信。#8）、cold-start.sh（アイドル後の初回 TTFB。#9）、ops.sh（ログ・リビジョン・切り戻し・アラート確認。#10）
 docs/             検証レポート（検証項目ごとに 1 ファイル）+ 最終判定
 ```
 
@@ -251,6 +253,19 @@ scripts/cold-start.sh image-size                               # Artifact Regist
 # min_instances>=1 の構成は常駐モード（落ちないのでアイドル後の初回をそのまま採用し、待ちを延ばさない。N=5 で約 80 分）
 # gcloud の認証が切れる（十数時間）と再開手順を出して止まる。gcloud auth login --no-launch-browser の後、同じコマンドで続きから追記される
 # 計測中はサービスに触らない（アイドルが途切れる）。min_instances=1 は課金が発生するので終わったら 0 に戻して apply
+```
+
+### 運用（Dev Container 内で実施。詳細は `docs/08`）
+
+```bash
+scripts/ops.sh logs 50            # アプリのログ（stdout + stderr）を時系列で。範囲は FRESHNESS（既定 1d）
+scripts/ops.sh errors 20          # stderr のエラー行と 5xx のリクエスト
+scripts/ops.sh requests 20        # Cloud Run のリクエストログ（ステータス、レイテンシ）
+scripts/ops.sh revisions 10       # 新しい方から 10 件のリビジョン（ダイジェストから引いたタグ）とトラフィック。固定中は警告
+scripts/ops.sh rollback <REV>     # 緊急の切り戻し（トラフィックを 100% そのリビジョンへ）
+scripts/ops.sh to-latest          # 切り戻しの解除。terraform apply の前に必ず戻す
+echo 'alert_email = "<address>"' >> terraform/gcp/terraform.tfvars && terraform -chdir=terraform/gcp apply   # 5xx アラートを有効化
+scripts/ops.sh alert-test 3       # 500 を 3 回出してアラートを確認（fs_check = true の間だけ。無効なら 404 で止まる）
 ```
 
 ### AWS（Dev Container 内で実施。詳細は `docs/04`）

@@ -128,3 +128,9 @@ variable "memory" {
   type        = string
   default     = "512Mi"
 }
+
+variable "alert_email" {
+  description = "アラート（5 分間に 5xx が 1 回以上）の通知先メールアドレス。空ならアラートを作らない（docs/08 §3）"
+  type        = string
+  default     = ""
+}

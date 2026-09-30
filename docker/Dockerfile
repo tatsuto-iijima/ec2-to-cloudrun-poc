@@ -21,6 +21,8 @@ ENV PORT=8080 \
 # access/error ログは stdout/stderr へ（Cloud Logging に自動収集される）
 COPY docker/apache/ports.conf /etc/apache2/ports.conf
 COPY docker/apache/000-default.conf /etc/apache2/sites-available/000-default.conf
+COPY docker/apache/servername.conf /etc/apache2/conf-available/servername.conf
+RUN a2enconf servername
 
 # アプリ本体と依存関係
 COPY app/ /var/www/html/
